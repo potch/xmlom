@@ -6,19 +6,7 @@ function Document(dom) {
 }
 
 Document.prototype.find = function (name) {
-  var results = [];
-
-  function walk(node) {
-    if (node.name === name) {
-      results.push(node);
-    }
-
-    node.children.forEach(walk);
-  }
-
-  walk(this.doc.root);
-
-  return results;
+  return this.doc.root.find(name);
 };
 
 
@@ -38,6 +26,22 @@ Node.prototype.parents = function (name) {
     }
     cur = cur.parent;
   }
+  return results;
+};
+
+Node.prototype.find = function (name) {
+  var results = [];
+
+  function walk(node) {
+    if (node.name === name) {
+      results.push(node);
+    }
+
+    node.children.forEach(walk);
+  }
+
+  walk(this);
+
   return results;
 };
 
@@ -81,12 +85,13 @@ function getParser(callback) {
       cur = cur.parent;
     });
     cb.onCharacters(function(chars) {
-      var s = chars.trim();
-      if (s.length) {
-        cur.value = s;
+      if (!cur.value) {
+        cur.value = '';
       }
+      cur.value += chars;
     });
     cb.onCdata(function(cdata) {
+      cur.cdata = cdata;
     });
     cb.onComment(function(msg) {
     });
