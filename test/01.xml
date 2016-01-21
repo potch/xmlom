@@ -1,0 +1,14 @@
+<test>
+  <node attribute="value">
+    stuff
+    <details>
+      More Details
+    </details>
+  </node>
+  <node attribute="another value">
+    additional stuff
+    <details>
+      Even More Details
+    </details>
+  </node>
+</test>

@@ -1,17 +1,32 @@
 {
   "name": "xmlom",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Tiny XML Object Model",
   "main": "index.js",
-  "scripts": {
-    "test": "node test.js"
+  "directories": {
+    "test": "test"
   },
-  "author": "Potch",
-  "license": "ISC",
   "dependencies": {
     "node-xml": "^1.0.2"
   },
   "devDependencies": {
-    "tap": "^1.3.1"
-  }
+    "tap": "^5.1.1"
+  },
+  "scripts": {
+    "test": "tap test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/potch/xmlom.git"
+  },
+  "keywords": [
+    "xml",
+    "dom"
+  ],
+  "author": "Potch",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/potch/xmlom/issues"
+  },
+  "homepage": "https://github.com/potch/xmlom#readme"
 }

@@ -40,27 +40,19 @@ Node.prototype.find = function (name) {
     node.children.forEach(walk);
   }
 
-  walk(this);
+  this.children.forEach(walk);
 
   return results;
 };
 
-
-exports.parseFile = function parseFile (path) {
-  return new Promise(function (resolve, reject) {
-    var parser = getParser(resolve);
-    parser.parseFile(path);
-  });
-};
-
 exports.parseString = function parseString (str) {
   return new Promise(function (resolve, reject) {
-    var parser = getParser(resolve);
+    var parser = getParser(resolve, reject);
     parser.parseString(str);
   });
 };
 
-function getParser(callback) {
+function getParser(callback, error) {
   var dom = {};
   var cur;
 
@@ -98,7 +90,7 @@ function getParser(callback) {
     cb.onWarning(function(msg) {
     });
     cb.onError(function(msg) {
-      console.log('<ERROR>'+JSON.stringify(msg)+"</ERROR>");
+      error(JSON.stringify(msg));
     });
   });
 }
