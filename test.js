@@ -2,7 +2,6 @@ var test = require('tap').test;
 var xml = require('./index');
 var fs = require('fs');
 var test01 = fs.readFileSync('./test/01.xml').toString();
-var test02 = fs.readFileSync('./test/02.xml').toString();
 
 test('string parse', function (t) {
   xml.parseString(test01).then(function (doc) {
@@ -45,6 +44,8 @@ test('Node properties', function (t) {
     t.ok(node.attrs, 'attributes');
     t.equal(node.attrs.attribute, 'value', 'attribute value');
 
+    t.equal(node.value.trim(), 'stuff', 'node content');
+
     t.ok(node.parent, 'parent');
 
     t.equal(node.children.length, 1, 'children');
@@ -69,6 +70,8 @@ test('Node.parents', function (t) {
     t.equal(node.parents('node').length, 1, 'direct parent');
     t.equal(node.parents('test').length, 1, 'deep parent');
     t.equal(node.parents('details').length, 0, 'look for self');
+
+    t.equal(doc.root.parents('test').length, 0, 'root.parents');
     t.end();
   });
 });
