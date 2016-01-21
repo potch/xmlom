@@ -2,11 +2,11 @@ var xml = require('node-xml');
 
 
 function Document(dom) {
-  this.doc = {root: dom};
+  this.root = dom;
 }
 
 Document.prototype.find = function (name) {
-  return this.doc.root.find(name);
+  return this.root.find(name);
 };
 
 
