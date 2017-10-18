@@ -1,6 +1,5 @@
 var xml = require('node-xml');
 
-
 function Document(dom) {
   this.root = dom;
 }
