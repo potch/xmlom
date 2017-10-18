@@ -1,6 +1,6 @@
 {
   "name": "xmlom",
-  "version": "2.1.1",
+  "version": "2.2.1",
   "description": "Tiny XML Object Model",
   "main": "index.js",
   "directories": {
