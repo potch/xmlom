@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>xmlom browser test</title>
+  </head>
+  <body>
+    <script src="browser/xmlom.js"></script>
+    <script>
+      fetch('test/01.xml')
+      .then(r => r.text())
+      .then(t => xmlom.parseString(t))
+      .then(o => {
+        console.log(o);
+        window.obj = o;
+      });
+    </script>
+  </body>
+</html>

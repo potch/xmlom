@@ -10,10 +10,13 @@
     "node-xml": "^1.0.2"
   },
   "devDependencies": {
+    "browserify": "^14.4.0",
+    "rollupify": "^0.4.0",
     "tap": "^5.1.1"
   },
   "scripts": {
-    "test": "tap test.js"
+    "test": "tap test.js",
+    "browser": "browserify -t rollupify browser.js > browser/xmlom.js"
   },
   "repository": {
     "type": "git",
