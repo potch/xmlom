@@ -9,7 +9,6 @@ test('string parse', function (t) {
     t.ok(doc.root, 'Document.root exists');
     t.end();
   }).catch(function (error) {
-    console.error(error);
     t.bailout('parse error:', error);
   });
 });
@@ -19,12 +18,10 @@ function loadTestDocument(t, cb) {
     try {
       cb(results);
     } catch (e) {
-      console.error(e);
       t.fail(e);
       t.end();
     }
   }).catch(function (error) {
-    console.error(error);
     t.bailout('parse error:', error);
   });
 }
