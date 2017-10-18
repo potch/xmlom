@@ -1,22 +1,27 @@
 {
   "name": "xmlom",
-  "version": "2.2.1",
+  "version": "3.0.0",
   "description": "Tiny XML Object Model",
   "main": "index.js",
   "directories": {
     "test": "test"
   },
   "dependencies": {
-    "node-xml": "^1.0.2"
+    "sax": "^1.2.4"
   },
   "devDependencies": {
-    "browserify": "^14.4.0",
+    "onchange": "^3.2.1",
+    "rollup": "^0.50.0",
+    "rollup-plugin-commonjs": "^8.2.3",
+    "rollup-plugin-node-builtins": "^2.1.2",
+    "rollup-plugin-node-resolve": "^3.0.0",
     "rollupify": "^0.4.0",
     "tap": "^5.1.1"
   },
   "scripts": {
     "test": "tap test.js",
-    "browser": "browserify -t rollupify browser.js > browser/xmlom.js"
+    "browser": "rollup -c",
+    "dev": "onchange index.js -- npm run test"
   },
   "repository": {
     "type": "git",

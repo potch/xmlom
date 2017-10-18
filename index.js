@@ -1,4 +1,4 @@
-var xml = require('node-xml');
+var sax = require('sax');
 
 function Document(dom) {
   this.root = dom;
@@ -47,49 +47,47 @@ Node.prototype.find = function (name) {
 exports.parseString = function parseString (str) {
   return new Promise(function (resolve, reject) {
     var parser = getParser(resolve, reject);
-    parser.parseString(str);
+    parser.write(str).close();
   });
 };
 
 function getParser(callback, error) {
-  var dom = {};
-  var cur;
+  var cur = new Node();
+  cur.root = true;
 
-  return new xml.SaxParser(function(cb) {
-    cb.onStartDocument(function() {
-      cur = new Node();
-      cur.root = true;
-    });
-    cb.onEndDocument(function() {
+  var parser = sax.parser(true);
+
+  parser.onerror = function (e) {
+    error(e);
+  };
+
+  parser.onopentag = function (obj) {
+    var o = new Node(obj.name);
+    if (obj.attributes) {
+      o.attrs = obj.attributes;
+    }
+    o.parent = cur;
+    cur.children.push(o);
+    cur = o;
+  };
+
+  parser.onclosetag = function () {
+    cur = cur.parent;
+    if (!cur.parent) {
       callback(new Document(cur));
-    });
-    cb.onStartElementNS(function(elem, attrs, prefix, uri, namespaces) {
-      var o = new Node(elem);
-      attrs.forEach(function (a) {
-        o.attrs[a[0]] = a[1];
-      });
-      o.parent = cur;
-      cur.children.push(o);
-      cur = o;
-    });
-    cb.onEndElementNS(function(elem) {
-      cur = cur.parent;
-    });
-    cb.onCharacters(function(chars) {
-      if (!cur.value) {
-        cur.value = '';
-      }
-      cur.value += chars;
-    });
-    cb.onCdata(function(cdata) {
-      cur.cdata = cdata;
-    });
-    cb.onComment(function(msg) {
-    });
-    cb.onWarning(function(msg) {
-    });
-    cb.onError(function(msg) {
-      error(JSON.stringify(msg));
-    });
-  });
+    }
+  };
+
+  parser.oncdata = function(cdata) {
+    cur.cdata = cdata;
+  };
+
+  parser.ontext = function (text) {
+    if (!cur.value) {
+      cur.value = '';
+    }
+    cur.value += text;
+  };
+
+  return parser;
 }

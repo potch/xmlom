@@ -1,12 +1,1577 @@
-(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+var xmlom = (function (exports,stream,string_decoder) {
 'use strict';
 
-window.xmlom = require('./index');
+var global = window;
 
-},{"./index":2}],2:[function(require,module,exports){
-'use strict';
+stream = stream && stream.hasOwnProperty('default') ? stream['default'] : stream;
+string_decoder = string_decoder && string_decoder.hasOwnProperty('default') ? string_decoder['default'] : string_decoder;
 
-var xml = require('node-xml');
+function createCommonjsModule(fn, module) {
+	return module = { exports: {} }, fn(module, module.exports), module.exports;
+}
+
+var sax = createCommonjsModule(function (module, exports) {
+(function (sax) { // wrapper for non-node envs
+  sax.parser = function (strict, opt) { return new SAXParser(strict, opt) };
+  sax.SAXParser = SAXParser;
+  sax.SAXStream = SAXStream;
+  sax.createStream = createStream;
+
+  // When we pass the MAX_BUFFER_LENGTH position, start checking for buffer overruns.
+  // When we check, schedule the next check for MAX_BUFFER_LENGTH - (max(buffer lengths)),
+  // since that's the earliest that a buffer overrun could occur.  This way, checks are
+  // as rare as required, but as often as necessary to ensure never crossing this bound.
+  // Furthermore, buffers are only tested at most once per write(), so passing a very
+  // large string into write() might have undesirable effects, but this is manageable by
+  // the caller, so it is assumed to be safe.  Thus, a call to write() may, in the extreme
+  // edge case, result in creating at most one complete copy of the string passed in.
+  // Set to Infinity to have unlimited buffers.
+  sax.MAX_BUFFER_LENGTH = 64 * 1024;
+
+  var buffers = [
+    'comment', 'sgmlDecl', 'textNode', 'tagName', 'doctype',
+    'procInstName', 'procInstBody', 'entity', 'attribName',
+    'attribValue', 'cdata', 'script'
+  ];
+
+  sax.EVENTS = [
+    'text',
+    'processinginstruction',
+    'sgmldeclaration',
+    'doctype',
+    'comment',
+    'opentagstart',
+    'attribute',
+    'opentag',
+    'closetag',
+    'opencdata',
+    'cdata',
+    'closecdata',
+    'error',
+    'end',
+    'ready',
+    'script',
+    'opennamespace',
+    'closenamespace'
+  ];
+
+  function SAXParser (strict, opt) {
+    if (!(this instanceof SAXParser)) {
+      return new SAXParser(strict, opt)
+    }
+
+    var parser = this;
+    clearBuffers(parser);
+    parser.q = parser.c = '';
+    parser.bufferCheckPosition = sax.MAX_BUFFER_LENGTH;
+    parser.opt = opt || {};
+    parser.opt.lowercase = parser.opt.lowercase || parser.opt.lowercasetags;
+    parser.looseCase = parser.opt.lowercase ? 'toLowerCase' : 'toUpperCase';
+    parser.tags = [];
+    parser.closed = parser.closedRoot = parser.sawRoot = false;
+    parser.tag = parser.error = null;
+    parser.strict = !!strict;
+    parser.noscript = !!(strict || parser.opt.noscript);
+    parser.state = S.BEGIN;
+    parser.strictEntities = parser.opt.strictEntities;
+    parser.ENTITIES = parser.strictEntities ? Object.create(sax.XML_ENTITIES) : Object.create(sax.ENTITIES);
+    parser.attribList = [];
+
+    // namespaces form a prototype chain.
+    // it always points at the current tag,
+    // which protos to its parent tag.
+    if (parser.opt.xmlns) {
+      parser.ns = Object.create(rootNS);
+    }
+
+    // mostly just for error reporting
+    parser.trackPosition = parser.opt.position !== false;
+    if (parser.trackPosition) {
+      parser.position = parser.line = parser.column = 0;
+    }
+    emit(parser, 'onready');
+  }
+
+  if (!Object.create) {
+    Object.create = function (o) {
+      function F () {}
+      F.prototype = o;
+      var newf = new F();
+      return newf
+    };
+  }
+
+  if (!Object.keys) {
+    Object.keys = function (o) {
+      var a = [];
+      for (var i in o) if (o.hasOwnProperty(i)) a.push(i);
+      return a
+    };
+  }
+
+  function checkBufferLength (parser) {
+    var maxAllowed = Math.max(sax.MAX_BUFFER_LENGTH, 10);
+    var maxActual = 0;
+    for (var i = 0, l = buffers.length; i < l; i++) {
+      var len = parser[buffers[i]].length;
+      if (len > maxAllowed) {
+        // Text/cdata nodes can get big, and since they're buffered,
+        // we can get here under normal conditions.
+        // Avoid issues by emitting the text node now,
+        // so at least it won't get any bigger.
+        switch (buffers[i]) {
+          case 'textNode':
+            closeText(parser);
+            break
+
+          case 'cdata':
+            emitNode(parser, 'oncdata', parser.cdata);
+            parser.cdata = '';
+            break
+
+          case 'script':
+            emitNode(parser, 'onscript', parser.script);
+            parser.script = '';
+            break
+
+          default:
+            error(parser, 'Max buffer length exceeded: ' + buffers[i]);
+        }
+      }
+      maxActual = Math.max(maxActual, len);
+    }
+    // schedule the next check for the earliest possible buffer overrun.
+    var m = sax.MAX_BUFFER_LENGTH - maxActual;
+    parser.bufferCheckPosition = m + parser.position;
+  }
+
+  function clearBuffers (parser) {
+    for (var i = 0, l = buffers.length; i < l; i++) {
+      parser[buffers[i]] = '';
+    }
+  }
+
+  function flushBuffers (parser) {
+    closeText(parser);
+    if (parser.cdata !== '') {
+      emitNode(parser, 'oncdata', parser.cdata);
+      parser.cdata = '';
+    }
+    if (parser.script !== '') {
+      emitNode(parser, 'onscript', parser.script);
+      parser.script = '';
+    }
+  }
+
+  SAXParser.prototype = {
+    end: function () { end(this); },
+    write: write,
+    resume: function () { this.error = null; return this },
+    close: function () { return this.write(null) },
+    flush: function () { flushBuffers(this); }
+  };
+
+  var Stream;
+  try {
+    Stream = stream.Stream;
+  } catch (ex) {
+    Stream = function () {};
+  }
+
+  var streamWraps = sax.EVENTS.filter(function (ev) {
+    return ev !== 'error' && ev !== 'end'
+  });
+
+  function createStream (strict, opt) {
+    return new SAXStream(strict, opt)
+  }
+
+  function SAXStream (strict, opt) {
+    if (!(this instanceof SAXStream)) {
+      return new SAXStream(strict, opt)
+    }
+
+    Stream.apply(this);
+
+    this._parser = new SAXParser(strict, opt);
+    this.writable = true;
+    this.readable = true;
+
+    var me = this;
+
+    this._parser.onend = function () {
+      me.emit('end');
+    };
+
+    this._parser.onerror = function (er) {
+      me.emit('error', er);
+
+      // if didn't throw, then means error was handled.
+      // go ahead and clear error, so we can write again.
+      me._parser.error = null;
+    };
+
+    this._decoder = null;
+
+    streamWraps.forEach(function (ev) {
+      Object.defineProperty(me, 'on' + ev, {
+        get: function () {
+          return me._parser['on' + ev]
+        },
+        set: function (h) {
+          if (!h) {
+            me.removeAllListeners(ev);
+            me._parser['on' + ev] = h;
+            return h
+          }
+          me.on(ev, h);
+        },
+        enumerable: true,
+        configurable: false
+      });
+    });
+  }
+
+  SAXStream.prototype = Object.create(Stream.prototype, {
+    constructor: {
+      value: SAXStream
+    }
+  });
+
+  SAXStream.prototype.write = function (data) {
+    if (typeof Buffer === 'function' &&
+      typeof Buffer.isBuffer === 'function' &&
+      Buffer.isBuffer(data)) {
+      if (!this._decoder) {
+        var SD = string_decoder.StringDecoder;
+        this._decoder = new SD('utf8');
+      }
+      data = this._decoder.write(data);
+    }
+
+    this._parser.write(data.toString());
+    this.emit('data', data);
+    return true
+  };
+
+  SAXStream.prototype.end = function (chunk) {
+    if (chunk && chunk.length) {
+      this.write(chunk);
+    }
+    this._parser.end();
+    return true
+  };
+
+  SAXStream.prototype.on = function (ev, handler) {
+    var me = this;
+    if (!me._parser['on' + ev] && streamWraps.indexOf(ev) !== -1) {
+      me._parser['on' + ev] = function () {
+        var args = arguments.length === 1 ? [arguments[0]] : Array.apply(null, arguments);
+        args.splice(0, 0, ev);
+        me.emit.apply(me, args);
+      };
+    }
+
+    return Stream.prototype.on.call(me, ev, handler)
+  };
+
+  // this really needs to be replaced with character classes.
+  // XML allows all manner of ridiculous numbers and digits.
+  var CDATA = '[CDATA[';
+  var DOCTYPE = 'DOCTYPE';
+  var XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace';
+  var XMLNS_NAMESPACE = 'http://www.w3.org/2000/xmlns/';
+  var rootNS = { xml: XML_NAMESPACE, xmlns: XMLNS_NAMESPACE };
+
+  // http://www.w3.org/TR/REC-xml/#NT-NameStartChar
+  // This implementation works on strings, a single character at a time
+  // as such, it cannot ever support astral-plane characters (10000-EFFFF)
+  // without a significant breaking change to either this  parser, or the
+  // JavaScript language.  Implementation of an emoji-capable xml parser
+  // is left as an exercise for the reader.
+  var nameStart = /[:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/;
+
+  var nameBody = /[:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u00B7\u0300-\u036F\u203F-\u2040.\d-]/;
+
+  var entityStart = /[#:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/;
+  var entityBody = /[#:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u00B7\u0300-\u036F\u203F-\u2040.\d-]/;
+
+  function isWhitespace (c) {
+    return c === ' ' || c === '\n' || c === '\r' || c === '\t'
+  }
+
+  function isQuote (c) {
+    return c === '"' || c === '\''
+  }
+
+  function isAttribEnd (c) {
+    return c === '>' || isWhitespace(c)
+  }
+
+  function isMatch (regex, c) {
+    return regex.test(c)
+  }
+
+  function notMatch (regex, c) {
+    return !isMatch(regex, c)
+  }
+
+  var S = 0;
+  sax.STATE = {
+    BEGIN: S++, // leading byte order mark or whitespace
+    BEGIN_WHITESPACE: S++, // leading whitespace
+    TEXT: S++, // general stuff
+    TEXT_ENTITY: S++, // &amp and such.
+    OPEN_WAKA: S++, // <
+    SGML_DECL: S++, // <!BLARG
+    SGML_DECL_QUOTED: S++, // <!BLARG foo "bar
+    DOCTYPE: S++, // <!DOCTYPE
+    DOCTYPE_QUOTED: S++, // <!DOCTYPE "//blah
+    DOCTYPE_DTD: S++, // <!DOCTYPE "//blah" [ ...
+    DOCTYPE_DTD_QUOTED: S++, // <!DOCTYPE "//blah" [ "foo
+    COMMENT_STARTING: S++, // <!-
+    COMMENT: S++, // <!--
+    COMMENT_ENDING: S++, // <!-- blah -
+    COMMENT_ENDED: S++, // <!-- blah --
+    CDATA: S++, // <![CDATA[ something
+    CDATA_ENDING: S++, // ]
+    CDATA_ENDING_2: S++, // ]]
+    PROC_INST: S++, // <?hi
+    PROC_INST_BODY: S++, // <?hi there
+    PROC_INST_ENDING: S++, // <?hi "there" ?
+    OPEN_TAG: S++, // <strong
+    OPEN_TAG_SLASH: S++, // <strong /
+    ATTRIB: S++, // <a
+    ATTRIB_NAME: S++, // <a foo
+    ATTRIB_NAME_SAW_WHITE: S++, // <a foo _
+    ATTRIB_VALUE: S++, // <a foo=
+    ATTRIB_VALUE_QUOTED: S++, // <a foo="bar
+    ATTRIB_VALUE_CLOSED: S++, // <a foo="bar"
+    ATTRIB_VALUE_UNQUOTED: S++, // <a foo=bar
+    ATTRIB_VALUE_ENTITY_Q: S++, // <foo bar="&quot;"
+    ATTRIB_VALUE_ENTITY_U: S++, // <foo bar=&quot
+    CLOSE_TAG: S++, // </a
+    CLOSE_TAG_SAW_WHITE: S++, // </a   >
+    SCRIPT: S++, // <script> ...
+    SCRIPT_ENDING: S++ // <script> ... <
+  };
+
+  sax.XML_ENTITIES = {
+    'amp': '&',
+    'gt': '>',
+    'lt': '<',
+    'quot': '"',
+    'apos': "'"
+  };
+
+  sax.ENTITIES = {
+    'amp': '&',
+    'gt': '>',
+    'lt': '<',
+    'quot': '"',
+    'apos': "'",
+    'AElig': 198,
+    'Aacute': 193,
+    'Acirc': 194,
+    'Agrave': 192,
+    'Aring': 197,
+    'Atilde': 195,
+    'Auml': 196,
+    'Ccedil': 199,
+    'ETH': 208,
+    'Eacute': 201,
+    'Ecirc': 202,
+    'Egrave': 200,
+    'Euml': 203,
+    'Iacute': 205,
+    'Icirc': 206,
+    'Igrave': 204,
+    'Iuml': 207,
+    'Ntilde': 209,
+    'Oacute': 211,
+    'Ocirc': 212,
+    'Ograve': 210,
+    'Oslash': 216,
+    'Otilde': 213,
+    'Ouml': 214,
+    'THORN': 222,
+    'Uacute': 218,
+    'Ucirc': 219,
+    'Ugrave': 217,
+    'Uuml': 220,
+    'Yacute': 221,
+    'aacute': 225,
+    'acirc': 226,
+    'aelig': 230,
+    'agrave': 224,
+    'aring': 229,
+    'atilde': 227,
+    'auml': 228,
+    'ccedil': 231,
+    'eacute': 233,
+    'ecirc': 234,
+    'egrave': 232,
+    'eth': 240,
+    'euml': 235,
+    'iacute': 237,
+    'icirc': 238,
+    'igrave': 236,
+    'iuml': 239,
+    'ntilde': 241,
+    'oacute': 243,
+    'ocirc': 244,
+    'ograve': 242,
+    'oslash': 248,
+    'otilde': 245,
+    'ouml': 246,
+    'szlig': 223,
+    'thorn': 254,
+    'uacute': 250,
+    'ucirc': 251,
+    'ugrave': 249,
+    'uuml': 252,
+    'yacute': 253,
+    'yuml': 255,
+    'copy': 169,
+    'reg': 174,
+    'nbsp': 160,
+    'iexcl': 161,
+    'cent': 162,
+    'pound': 163,
+    'curren': 164,
+    'yen': 165,
+    'brvbar': 166,
+    'sect': 167,
+    'uml': 168,
+    'ordf': 170,
+    'laquo': 171,
+    'not': 172,
+    'shy': 173,
+    'macr': 175,
+    'deg': 176,
+    'plusmn': 177,
+    'sup1': 185,
+    'sup2': 178,
+    'sup3': 179,
+    'acute': 180,
+    'micro': 181,
+    'para': 182,
+    'middot': 183,
+    'cedil': 184,
+    'ordm': 186,
+    'raquo': 187,
+    'frac14': 188,
+    'frac12': 189,
+    'frac34': 190,
+    'iquest': 191,
+    'times': 215,
+    'divide': 247,
+    'OElig': 338,
+    'oelig': 339,
+    'Scaron': 352,
+    'scaron': 353,
+    'Yuml': 376,
+    'fnof': 402,
+    'circ': 710,
+    'tilde': 732,
+    'Alpha': 913,
+    'Beta': 914,
+    'Gamma': 915,
+    'Delta': 916,
+    'Epsilon': 917,
+    'Zeta': 918,
+    'Eta': 919,
+    'Theta': 920,
+    'Iota': 921,
+    'Kappa': 922,
+    'Lambda': 923,
+    'Mu': 924,
+    'Nu': 925,
+    'Xi': 926,
+    'Omicron': 927,
+    'Pi': 928,
+    'Rho': 929,
+    'Sigma': 931,
+    'Tau': 932,
+    'Upsilon': 933,
+    'Phi': 934,
+    'Chi': 935,
+    'Psi': 936,
+    'Omega': 937,
+    'alpha': 945,
+    'beta': 946,
+    'gamma': 947,
+    'delta': 948,
+    'epsilon': 949,
+    'zeta': 950,
+    'eta': 951,
+    'theta': 952,
+    'iota': 953,
+    'kappa': 954,
+    'lambda': 955,
+    'mu': 956,
+    'nu': 957,
+    'xi': 958,
+    'omicron': 959,
+    'pi': 960,
+    'rho': 961,
+    'sigmaf': 962,
+    'sigma': 963,
+    'tau': 964,
+    'upsilon': 965,
+    'phi': 966,
+    'chi': 967,
+    'psi': 968,
+    'omega': 969,
+    'thetasym': 977,
+    'upsih': 978,
+    'piv': 982,
+    'ensp': 8194,
+    'emsp': 8195,
+    'thinsp': 8201,
+    'zwnj': 8204,
+    'zwj': 8205,
+    'lrm': 8206,
+    'rlm': 8207,
+    'ndash': 8211,
+    'mdash': 8212,
+    'lsquo': 8216,
+    'rsquo': 8217,
+    'sbquo': 8218,
+    'ldquo': 8220,
+    'rdquo': 8221,
+    'bdquo': 8222,
+    'dagger': 8224,
+    'Dagger': 8225,
+    'bull': 8226,
+    'hellip': 8230,
+    'permil': 8240,
+    'prime': 8242,
+    'Prime': 8243,
+    'lsaquo': 8249,
+    'rsaquo': 8250,
+    'oline': 8254,
+    'frasl': 8260,
+    'euro': 8364,
+    'image': 8465,
+    'weierp': 8472,
+    'real': 8476,
+    'trade': 8482,
+    'alefsym': 8501,
+    'larr': 8592,
+    'uarr': 8593,
+    'rarr': 8594,
+    'darr': 8595,
+    'harr': 8596,
+    'crarr': 8629,
+    'lArr': 8656,
+    'uArr': 8657,
+    'rArr': 8658,
+    'dArr': 8659,
+    'hArr': 8660,
+    'forall': 8704,
+    'part': 8706,
+    'exist': 8707,
+    'empty': 8709,
+    'nabla': 8711,
+    'isin': 8712,
+    'notin': 8713,
+    'ni': 8715,
+    'prod': 8719,
+    'sum': 8721,
+    'minus': 8722,
+    'lowast': 8727,
+    'radic': 8730,
+    'prop': 8733,
+    'infin': 8734,
+    'ang': 8736,
+    'and': 8743,
+    'or': 8744,
+    'cap': 8745,
+    'cup': 8746,
+    'int': 8747,
+    'there4': 8756,
+    'sim': 8764,
+    'cong': 8773,
+    'asymp': 8776,
+    'ne': 8800,
+    'equiv': 8801,
+    'le': 8804,
+    'ge': 8805,
+    'sub': 8834,
+    'sup': 8835,
+    'nsub': 8836,
+    'sube': 8838,
+    'supe': 8839,
+    'oplus': 8853,
+    'otimes': 8855,
+    'perp': 8869,
+    'sdot': 8901,
+    'lceil': 8968,
+    'rceil': 8969,
+    'lfloor': 8970,
+    'rfloor': 8971,
+    'lang': 9001,
+    'rang': 9002,
+    'loz': 9674,
+    'spades': 9824,
+    'clubs': 9827,
+    'hearts': 9829,
+    'diams': 9830
+  };
+
+  Object.keys(sax.ENTITIES).forEach(function (key) {
+    var e = sax.ENTITIES[key];
+    var s = typeof e === 'number' ? String.fromCharCode(e) : e;
+    sax.ENTITIES[key] = s;
+  });
+
+  for (var s in sax.STATE) {
+    sax.STATE[sax.STATE[s]] = s;
+  }
+
+  // shorthand
+  S = sax.STATE;
+
+  function emit (parser, event, data) {
+    parser[event] && parser[event](data);
+  }
+
+  function emitNode (parser, nodeType, data) {
+    if (parser.textNode) closeText(parser);
+    emit(parser, nodeType, data);
+  }
+
+  function closeText (parser) {
+    parser.textNode = textopts(parser.opt, parser.textNode);
+    if (parser.textNode) emit(parser, 'ontext', parser.textNode);
+    parser.textNode = '';
+  }
+
+  function textopts (opt, text) {
+    if (opt.trim) text = text.trim();
+    if (opt.normalize) text = text.replace(/\s+/g, ' ');
+    return text
+  }
+
+  function error (parser, er) {
+    closeText(parser);
+    if (parser.trackPosition) {
+      er += '\nLine: ' + parser.line +
+        '\nColumn: ' + parser.column +
+        '\nChar: ' + parser.c;
+    }
+    er = new Error(er);
+    parser.error = er;
+    emit(parser, 'onerror', er);
+    return parser
+  }
+
+  function end (parser) {
+    if (parser.sawRoot && !parser.closedRoot) strictFail(parser, 'Unclosed root tag');
+    if ((parser.state !== S.BEGIN) &&
+      (parser.state !== S.BEGIN_WHITESPACE) &&
+      (parser.state !== S.TEXT)) {
+      error(parser, 'Unexpected end');
+    }
+    closeText(parser);
+    parser.c = '';
+    parser.closed = true;
+    emit(parser, 'onend');
+    SAXParser.call(parser, parser.strict, parser.opt);
+    return parser
+  }
+
+  function strictFail (parser, message) {
+    if (typeof parser !== 'object' || !(parser instanceof SAXParser)) {
+      throw new Error('bad call to strictFail')
+    }
+    if (parser.strict) {
+      error(parser, message);
+    }
+  }
+
+  function newTag (parser) {
+    if (!parser.strict) parser.tagName = parser.tagName[parser.looseCase]();
+    var parent = parser.tags[parser.tags.length - 1] || parser;
+    var tag = parser.tag = { name: parser.tagName, attributes: {} };
+
+    // will be overridden if tag contails an xmlns="foo" or xmlns:foo="bar"
+    if (parser.opt.xmlns) {
+      tag.ns = parent.ns;
+    }
+    parser.attribList.length = 0;
+    emitNode(parser, 'onopentagstart', tag);
+  }
+
+  function qname (name, attribute) {
+    var i = name.indexOf(':');
+    var qualName = i < 0 ? [ '', name ] : name.split(':');
+    var prefix = qualName[0];
+    var local = qualName[1];
+
+    // <x "xmlns"="http://foo">
+    if (attribute && name === 'xmlns') {
+      prefix = 'xmlns';
+      local = '';
+    }
+
+    return { prefix: prefix, local: local }
+  }
+
+  function attrib (parser) {
+    if (!parser.strict) {
+      parser.attribName = parser.attribName[parser.looseCase]();
+    }
+
+    if (parser.attribList.indexOf(parser.attribName) !== -1 ||
+      parser.tag.attributes.hasOwnProperty(parser.attribName)) {
+      parser.attribName = parser.attribValue = '';
+      return
+    }
+
+    if (parser.opt.xmlns) {
+      var qn = qname(parser.attribName, true);
+      var prefix = qn.prefix;
+      var local = qn.local;
+
+      if (prefix === 'xmlns') {
+        // namespace binding attribute. push the binding into scope
+        if (local === 'xml' && parser.attribValue !== XML_NAMESPACE) {
+          strictFail(parser,
+            'xml: prefix must be bound to ' + XML_NAMESPACE + '\n' +
+            'Actual: ' + parser.attribValue);
+        } else if (local === 'xmlns' && parser.attribValue !== XMLNS_NAMESPACE) {
+          strictFail(parser,
+            'xmlns: prefix must be bound to ' + XMLNS_NAMESPACE + '\n' +
+            'Actual: ' + parser.attribValue);
+        } else {
+          var tag = parser.tag;
+          var parent = parser.tags[parser.tags.length - 1] || parser;
+          if (tag.ns === parent.ns) {
+            tag.ns = Object.create(parent.ns);
+          }
+          tag.ns[local] = parser.attribValue;
+        }
+      }
+
+      // defer onattribute events until all attributes have been seen
+      // so any new bindings can take effect. preserve attribute order
+      // so deferred events can be emitted in document order
+      parser.attribList.push([parser.attribName, parser.attribValue]);
+    } else {
+      // in non-xmlns mode, we can emit the event right away
+      parser.tag.attributes[parser.attribName] = parser.attribValue;
+      emitNode(parser, 'onattribute', {
+        name: parser.attribName,
+        value: parser.attribValue
+      });
+    }
+
+    parser.attribName = parser.attribValue = '';
+  }
+
+  function openTag (parser, selfClosing) {
+    if (parser.opt.xmlns) {
+      // emit namespace binding events
+      var tag = parser.tag;
+
+      // add namespace info to tag
+      var qn = qname(parser.tagName);
+      tag.prefix = qn.prefix;
+      tag.local = qn.local;
+      tag.uri = tag.ns[qn.prefix] || '';
+
+      if (tag.prefix && !tag.uri) {
+        strictFail(parser, 'Unbound namespace prefix: ' +
+          JSON.stringify(parser.tagName));
+        tag.uri = qn.prefix;
+      }
+
+      var parent = parser.tags[parser.tags.length - 1] || parser;
+      if (tag.ns && parent.ns !== tag.ns) {
+        Object.keys(tag.ns).forEach(function (p) {
+          emitNode(parser, 'onopennamespace', {
+            prefix: p,
+            uri: tag.ns[p]
+          });
+        });
+      }
+
+      // handle deferred onattribute events
+      // Note: do not apply default ns to attributes:
+      //   http://www.w3.org/TR/REC-xml-names/#defaulting
+      for (var i = 0, l = parser.attribList.length; i < l; i++) {
+        var nv = parser.attribList[i];
+        var name = nv[0];
+        var value = nv[1];
+        var qualName = qname(name, true);
+        var prefix = qualName.prefix;
+        var local = qualName.local;
+        var uri = prefix === '' ? '' : (tag.ns[prefix] || '');
+        var a = {
+          name: name,
+          value: value,
+          prefix: prefix,
+          local: local,
+          uri: uri
+        };
+
+        // if there's any attributes with an undefined namespace,
+        // then fail on them now.
+        if (prefix && prefix !== 'xmlns' && !uri) {
+          strictFail(parser, 'Unbound namespace prefix: ' +
+            JSON.stringify(prefix));
+          a.uri = prefix;
+        }
+        parser.tag.attributes[name] = a;
+        emitNode(parser, 'onattribute', a);
+      }
+      parser.attribList.length = 0;
+    }
+
+    parser.tag.isSelfClosing = !!selfClosing;
+
+    // process the tag
+    parser.sawRoot = true;
+    parser.tags.push(parser.tag);
+    emitNode(parser, 'onopentag', parser.tag);
+    if (!selfClosing) {
+      // special case for <script> in non-strict mode.
+      if (!parser.noscript && parser.tagName.toLowerCase() === 'script') {
+        parser.state = S.SCRIPT;
+      } else {
+        parser.state = S.TEXT;
+      }
+      parser.tag = null;
+      parser.tagName = '';
+    }
+    parser.attribName = parser.attribValue = '';
+    parser.attribList.length = 0;
+  }
+
+  function closeTag (parser) {
+    if (!parser.tagName) {
+      strictFail(parser, 'Weird empty close tag.');
+      parser.textNode += '</>';
+      parser.state = S.TEXT;
+      return
+    }
+
+    if (parser.script) {
+      if (parser.tagName !== 'script') {
+        parser.script += '</' + parser.tagName + '>';
+        parser.tagName = '';
+        parser.state = S.SCRIPT;
+        return
+      }
+      emitNode(parser, 'onscript', parser.script);
+      parser.script = '';
+    }
+
+    // first make sure that the closing tag actually exists.
+    // <a><b></c></b></a> will close everything, otherwise.
+    var t = parser.tags.length;
+    var tagName = parser.tagName;
+    if (!parser.strict) {
+      tagName = tagName[parser.looseCase]();
+    }
+    var closeTo = tagName;
+    while (t--) {
+      var close = parser.tags[t];
+      if (close.name !== closeTo) {
+        // fail the first time in strict mode
+        strictFail(parser, 'Unexpected close tag');
+      } else {
+        break
+      }
+    }
+
+    // didn't find it.  we already failed for strict, so just abort.
+    if (t < 0) {
+      strictFail(parser, 'Unmatched closing tag: ' + parser.tagName);
+      parser.textNode += '</' + parser.tagName + '>';
+      parser.state = S.TEXT;
+      return
+    }
+    parser.tagName = tagName;
+    var s = parser.tags.length;
+    while (s-- > t) {
+      var tag = parser.tag = parser.tags.pop();
+      parser.tagName = parser.tag.name;
+      emitNode(parser, 'onclosetag', parser.tagName);
+
+      var parent = parser.tags[parser.tags.length - 1] || parser;
+      if (parser.opt.xmlns && tag.ns !== parent.ns) {
+        // remove namespace bindings introduced by tag
+        Object.keys(tag.ns).forEach(function (p) {
+          var n = tag.ns[p];
+          emitNode(parser, 'onclosenamespace', { prefix: p, uri: n });
+        });
+      }
+    }
+    if (t === 0) parser.closedRoot = true;
+    parser.tagName = parser.attribValue = parser.attribName = '';
+    parser.attribList.length = 0;
+    parser.state = S.TEXT;
+  }
+
+  function parseEntity (parser) {
+    var entity = parser.entity;
+    var entityLC = entity.toLowerCase();
+    var num;
+    var numStr = '';
+
+    if (parser.ENTITIES[entity]) {
+      return parser.ENTITIES[entity]
+    }
+    if (parser.ENTITIES[entityLC]) {
+      return parser.ENTITIES[entityLC]
+    }
+    entity = entityLC;
+    if (entity.charAt(0) === '#') {
+      if (entity.charAt(1) === 'x') {
+        entity = entity.slice(2);
+        num = parseInt(entity, 16);
+        numStr = num.toString(16);
+      } else {
+        entity = entity.slice(1);
+        num = parseInt(entity, 10);
+        numStr = num.toString(10);
+      }
+    }
+    entity = entity.replace(/^0+/, '');
+    if (isNaN(num) || numStr.toLowerCase() !== entity) {
+      strictFail(parser, 'Invalid character entity');
+      return '&' + parser.entity + ';'
+    }
+
+    return String.fromCodePoint(num)
+  }
+
+  function beginWhiteSpace (parser, c) {
+    if (c === '<') {
+      parser.state = S.OPEN_WAKA;
+      parser.startTagPosition = parser.position;
+    } else if (!isWhitespace(c)) {
+      // have to process this as a text node.
+      // weird, but happens.
+      strictFail(parser, 'Non-whitespace before first tag.');
+      parser.textNode = c;
+      parser.state = S.TEXT;
+    }
+  }
+
+  function charAt (chunk, i) {
+    var result = '';
+    if (i < chunk.length) {
+      result = chunk.charAt(i);
+    }
+    return result
+  }
+
+  function write (chunk) {
+    var parser = this;
+    if (this.error) {
+      throw this.error
+    }
+    if (parser.closed) {
+      return error(parser,
+        'Cannot write after close. Assign an onready handler.')
+    }
+    if (chunk === null) {
+      return end(parser)
+    }
+    if (typeof chunk === 'object') {
+      chunk = chunk.toString();
+    }
+    var i = 0;
+    var c = '';
+    while (true) {
+      c = charAt(chunk, i++);
+      parser.c = c;
+
+      if (!c) {
+        break
+      }
+
+      if (parser.trackPosition) {
+        parser.position++;
+        if (c === '\n') {
+          parser.line++;
+          parser.column = 0;
+        } else {
+          parser.column++;
+        }
+      }
+
+      switch (parser.state) {
+        case S.BEGIN:
+          parser.state = S.BEGIN_WHITESPACE;
+          if (c === '\uFEFF') {
+            continue
+          }
+          beginWhiteSpace(parser, c);
+          continue
+
+        case S.BEGIN_WHITESPACE:
+          beginWhiteSpace(parser, c);
+          continue
+
+        case S.TEXT:
+          if (parser.sawRoot && !parser.closedRoot) {
+            var starti = i - 1;
+            while (c && c !== '<' && c !== '&') {
+              c = charAt(chunk, i++);
+              if (c && parser.trackPosition) {
+                parser.position++;
+                if (c === '\n') {
+                  parser.line++;
+                  parser.column = 0;
+                } else {
+                  parser.column++;
+                }
+              }
+            }
+            parser.textNode += chunk.substring(starti, i - 1);
+          }
+          if (c === '<' && !(parser.sawRoot && parser.closedRoot && !parser.strict)) {
+            parser.state = S.OPEN_WAKA;
+            parser.startTagPosition = parser.position;
+          } else {
+            if (!isWhitespace(c) && (!parser.sawRoot || parser.closedRoot)) {
+              strictFail(parser, 'Text data outside of root node.');
+            }
+            if (c === '&') {
+              parser.state = S.TEXT_ENTITY;
+            } else {
+              parser.textNode += c;
+            }
+          }
+          continue
+
+        case S.SCRIPT:
+          // only non-strict
+          if (c === '<') {
+            parser.state = S.SCRIPT_ENDING;
+          } else {
+            parser.script += c;
+          }
+          continue
+
+        case S.SCRIPT_ENDING:
+          if (c === '/') {
+            parser.state = S.CLOSE_TAG;
+          } else {
+            parser.script += '<' + c;
+            parser.state = S.SCRIPT;
+          }
+          continue
+
+        case S.OPEN_WAKA:
+          // either a /, ?, !, or text is coming next.
+          if (c === '!') {
+            parser.state = S.SGML_DECL;
+            parser.sgmlDecl = '';
+          } else if (isWhitespace(c)) {
+            // wait for it...
+          } else if (isMatch(nameStart, c)) {
+            parser.state = S.OPEN_TAG;
+            parser.tagName = c;
+          } else if (c === '/') {
+            parser.state = S.CLOSE_TAG;
+            parser.tagName = '';
+          } else if (c === '?') {
+            parser.state = S.PROC_INST;
+            parser.procInstName = parser.procInstBody = '';
+          } else {
+            strictFail(parser, 'Unencoded <');
+            // if there was some whitespace, then add that in.
+            if (parser.startTagPosition + 1 < parser.position) {
+              var pad = parser.position - parser.startTagPosition;
+              c = new Array(pad).join(' ') + c;
+            }
+            parser.textNode += '<' + c;
+            parser.state = S.TEXT;
+          }
+          continue
+
+        case S.SGML_DECL:
+          if ((parser.sgmlDecl + c).toUpperCase() === CDATA) {
+            emitNode(parser, 'onopencdata');
+            parser.state = S.CDATA;
+            parser.sgmlDecl = '';
+            parser.cdata = '';
+          } else if (parser.sgmlDecl + c === '--') {
+            parser.state = S.COMMENT;
+            parser.comment = '';
+            parser.sgmlDecl = '';
+          } else if ((parser.sgmlDecl + c).toUpperCase() === DOCTYPE) {
+            parser.state = S.DOCTYPE;
+            if (parser.doctype || parser.sawRoot) {
+              strictFail(parser,
+                'Inappropriately located doctype declaration');
+            }
+            parser.doctype = '';
+            parser.sgmlDecl = '';
+          } else if (c === '>') {
+            emitNode(parser, 'onsgmldeclaration', parser.sgmlDecl);
+            parser.sgmlDecl = '';
+            parser.state = S.TEXT;
+          } else if (isQuote(c)) {
+            parser.state = S.SGML_DECL_QUOTED;
+            parser.sgmlDecl += c;
+          } else {
+            parser.sgmlDecl += c;
+          }
+          continue
+
+        case S.SGML_DECL_QUOTED:
+          if (c === parser.q) {
+            parser.state = S.SGML_DECL;
+            parser.q = '';
+          }
+          parser.sgmlDecl += c;
+          continue
+
+        case S.DOCTYPE:
+          if (c === '>') {
+            parser.state = S.TEXT;
+            emitNode(parser, 'ondoctype', parser.doctype);
+            parser.doctype = true; // just remember that we saw it.
+          } else {
+            parser.doctype += c;
+            if (c === '[') {
+              parser.state = S.DOCTYPE_DTD;
+            } else if (isQuote(c)) {
+              parser.state = S.DOCTYPE_QUOTED;
+              parser.q = c;
+            }
+          }
+          continue
+
+        case S.DOCTYPE_QUOTED:
+          parser.doctype += c;
+          if (c === parser.q) {
+            parser.q = '';
+            parser.state = S.DOCTYPE;
+          }
+          continue
+
+        case S.DOCTYPE_DTD:
+          parser.doctype += c;
+          if (c === ']') {
+            parser.state = S.DOCTYPE;
+          } else if (isQuote(c)) {
+            parser.state = S.DOCTYPE_DTD_QUOTED;
+            parser.q = c;
+          }
+          continue
+
+        case S.DOCTYPE_DTD_QUOTED:
+          parser.doctype += c;
+          if (c === parser.q) {
+            parser.state = S.DOCTYPE_DTD;
+            parser.q = '';
+          }
+          continue
+
+        case S.COMMENT:
+          if (c === '-') {
+            parser.state = S.COMMENT_ENDING;
+          } else {
+            parser.comment += c;
+          }
+          continue
+
+        case S.COMMENT_ENDING:
+          if (c === '-') {
+            parser.state = S.COMMENT_ENDED;
+            parser.comment = textopts(parser.opt, parser.comment);
+            if (parser.comment) {
+              emitNode(parser, 'oncomment', parser.comment);
+            }
+            parser.comment = '';
+          } else {
+            parser.comment += '-' + c;
+            parser.state = S.COMMENT;
+          }
+          continue
+
+        case S.COMMENT_ENDED:
+          if (c !== '>') {
+            strictFail(parser, 'Malformed comment');
+            // allow <!-- blah -- bloo --> in non-strict mode,
+            // which is a comment of " blah -- bloo "
+            parser.comment += '--' + c;
+            parser.state = S.COMMENT;
+          } else {
+            parser.state = S.TEXT;
+          }
+          continue
+
+        case S.CDATA:
+          if (c === ']') {
+            parser.state = S.CDATA_ENDING;
+          } else {
+            parser.cdata += c;
+          }
+          continue
+
+        case S.CDATA_ENDING:
+          if (c === ']') {
+            parser.state = S.CDATA_ENDING_2;
+          } else {
+            parser.cdata += ']' + c;
+            parser.state = S.CDATA;
+          }
+          continue
+
+        case S.CDATA_ENDING_2:
+          if (c === '>') {
+            if (parser.cdata) {
+              emitNode(parser, 'oncdata', parser.cdata);
+            }
+            emitNode(parser, 'onclosecdata');
+            parser.cdata = '';
+            parser.state = S.TEXT;
+          } else if (c === ']') {
+            parser.cdata += ']';
+          } else {
+            parser.cdata += ']]' + c;
+            parser.state = S.CDATA;
+          }
+          continue
+
+        case S.PROC_INST:
+          if (c === '?') {
+            parser.state = S.PROC_INST_ENDING;
+          } else if (isWhitespace(c)) {
+            parser.state = S.PROC_INST_BODY;
+          } else {
+            parser.procInstName += c;
+          }
+          continue
+
+        case S.PROC_INST_BODY:
+          if (!parser.procInstBody && isWhitespace(c)) {
+            continue
+          } else if (c === '?') {
+            parser.state = S.PROC_INST_ENDING;
+          } else {
+            parser.procInstBody += c;
+          }
+          continue
+
+        case S.PROC_INST_ENDING:
+          if (c === '>') {
+            emitNode(parser, 'onprocessinginstruction', {
+              name: parser.procInstName,
+              body: parser.procInstBody
+            });
+            parser.procInstName = parser.procInstBody = '';
+            parser.state = S.TEXT;
+          } else {
+            parser.procInstBody += '?' + c;
+            parser.state = S.PROC_INST_BODY;
+          }
+          continue
+
+        case S.OPEN_TAG:
+          if (isMatch(nameBody, c)) {
+            parser.tagName += c;
+          } else {
+            newTag(parser);
+            if (c === '>') {
+              openTag(parser);
+            } else if (c === '/') {
+              parser.state = S.OPEN_TAG_SLASH;
+            } else {
+              if (!isWhitespace(c)) {
+                strictFail(parser, 'Invalid character in tag name');
+              }
+              parser.state = S.ATTRIB;
+            }
+          }
+          continue
+
+        case S.OPEN_TAG_SLASH:
+          if (c === '>') {
+            openTag(parser, true);
+            closeTag(parser);
+          } else {
+            strictFail(parser, 'Forward-slash in opening tag not followed by >');
+            parser.state = S.ATTRIB;
+          }
+          continue
+
+        case S.ATTRIB:
+          // haven't read the attribute name yet.
+          if (isWhitespace(c)) {
+            continue
+          } else if (c === '>') {
+            openTag(parser);
+          } else if (c === '/') {
+            parser.state = S.OPEN_TAG_SLASH;
+          } else if (isMatch(nameStart, c)) {
+            parser.attribName = c;
+            parser.attribValue = '';
+            parser.state = S.ATTRIB_NAME;
+          } else {
+            strictFail(parser, 'Invalid attribute name');
+          }
+          continue
+
+        case S.ATTRIB_NAME:
+          if (c === '=') {
+            parser.state = S.ATTRIB_VALUE;
+          } else if (c === '>') {
+            strictFail(parser, 'Attribute without value');
+            parser.attribValue = parser.attribName;
+            attrib(parser);
+            openTag(parser);
+          } else if (isWhitespace(c)) {
+            parser.state = S.ATTRIB_NAME_SAW_WHITE;
+          } else if (isMatch(nameBody, c)) {
+            parser.attribName += c;
+          } else {
+            strictFail(parser, 'Invalid attribute name');
+          }
+          continue
+
+        case S.ATTRIB_NAME_SAW_WHITE:
+          if (c === '=') {
+            parser.state = S.ATTRIB_VALUE;
+          } else if (isWhitespace(c)) {
+            continue
+          } else {
+            strictFail(parser, 'Attribute without value');
+            parser.tag.attributes[parser.attribName] = '';
+            parser.attribValue = '';
+            emitNode(parser, 'onattribute', {
+              name: parser.attribName,
+              value: ''
+            });
+            parser.attribName = '';
+            if (c === '>') {
+              openTag(parser);
+            } else if (isMatch(nameStart, c)) {
+              parser.attribName = c;
+              parser.state = S.ATTRIB_NAME;
+            } else {
+              strictFail(parser, 'Invalid attribute name');
+              parser.state = S.ATTRIB;
+            }
+          }
+          continue
+
+        case S.ATTRIB_VALUE:
+          if (isWhitespace(c)) {
+            continue
+          } else if (isQuote(c)) {
+            parser.q = c;
+            parser.state = S.ATTRIB_VALUE_QUOTED;
+          } else {
+            strictFail(parser, 'Unquoted attribute value');
+            parser.state = S.ATTRIB_VALUE_UNQUOTED;
+            parser.attribValue = c;
+          }
+          continue
+
+        case S.ATTRIB_VALUE_QUOTED:
+          if (c !== parser.q) {
+            if (c === '&') {
+              parser.state = S.ATTRIB_VALUE_ENTITY_Q;
+            } else {
+              parser.attribValue += c;
+            }
+            continue
+          }
+          attrib(parser);
+          parser.q = '';
+          parser.state = S.ATTRIB_VALUE_CLOSED;
+          continue
+
+        case S.ATTRIB_VALUE_CLOSED:
+          if (isWhitespace(c)) {
+            parser.state = S.ATTRIB;
+          } else if (c === '>') {
+            openTag(parser);
+          } else if (c === '/') {
+            parser.state = S.OPEN_TAG_SLASH;
+          } else if (isMatch(nameStart, c)) {
+            strictFail(parser, 'No whitespace between attributes');
+            parser.attribName = c;
+            parser.attribValue = '';
+            parser.state = S.ATTRIB_NAME;
+          } else {
+            strictFail(parser, 'Invalid attribute name');
+          }
+          continue
+
+        case S.ATTRIB_VALUE_UNQUOTED:
+          if (!isAttribEnd(c)) {
+            if (c === '&') {
+              parser.state = S.ATTRIB_VALUE_ENTITY_U;
+            } else {
+              parser.attribValue += c;
+            }
+            continue
+          }
+          attrib(parser);
+          if (c === '>') {
+            openTag(parser);
+          } else {
+            parser.state = S.ATTRIB;
+          }
+          continue
+
+        case S.CLOSE_TAG:
+          if (!parser.tagName) {
+            if (isWhitespace(c)) {
+              continue
+            } else if (notMatch(nameStart, c)) {
+              if (parser.script) {
+                parser.script += '</' + c;
+                parser.state = S.SCRIPT;
+              } else {
+                strictFail(parser, 'Invalid tagname in closing tag.');
+              }
+            } else {
+              parser.tagName = c;
+            }
+          } else if (c === '>') {
+            closeTag(parser);
+          } else if (isMatch(nameBody, c)) {
+            parser.tagName += c;
+          } else if (parser.script) {
+            parser.script += '</' + parser.tagName;
+            parser.tagName = '';
+            parser.state = S.SCRIPT;
+          } else {
+            if (!isWhitespace(c)) {
+              strictFail(parser, 'Invalid tagname in closing tag');
+            }
+            parser.state = S.CLOSE_TAG_SAW_WHITE;
+          }
+          continue
+
+        case S.CLOSE_TAG_SAW_WHITE:
+          if (isWhitespace(c)) {
+            continue
+          }
+          if (c === '>') {
+            closeTag(parser);
+          } else {
+            strictFail(parser, 'Invalid characters in closing tag');
+          }
+          continue
+
+        case S.TEXT_ENTITY:
+        case S.ATTRIB_VALUE_ENTITY_Q:
+        case S.ATTRIB_VALUE_ENTITY_U:
+          var returnState;
+          var buffer;
+          switch (parser.state) {
+            case S.TEXT_ENTITY:
+              returnState = S.TEXT;
+              buffer = 'textNode';
+              break
+
+            case S.ATTRIB_VALUE_ENTITY_Q:
+              returnState = S.ATTRIB_VALUE_QUOTED;
+              buffer = 'attribValue';
+              break
+
+            case S.ATTRIB_VALUE_ENTITY_U:
+              returnState = S.ATTRIB_VALUE_UNQUOTED;
+              buffer = 'attribValue';
+              break
+          }
+
+          if (c === ';') {
+            parser[buffer] += parseEntity(parser);
+            parser.entity = '';
+            parser.state = returnState;
+          } else if (isMatch(parser.entity.length ? entityBody : entityStart, c)) {
+            parser.entity += c;
+          } else {
+            strictFail(parser, 'Invalid character in entity name');
+            parser[buffer] += '&' + parser.entity + c;
+            parser.entity = '';
+            parser.state = returnState;
+          }
+
+          continue
+
+        default:
+          throw new Error(parser, 'Unknown state: ' + parser.state)
+      }
+    } // while
+
+    if (parser.position >= parser.bufferCheckPosition) {
+      checkBufferLength(parser);
+    }
+    return parser
+  }
+
+  /*! http://mths.be/fromcodepoint v0.1.0 by @mathias */
+  /* istanbul ignore next */
+  if (!String.fromCodePoint) {
+    (function () {
+      var stringFromCharCode = String.fromCharCode;
+      var floor = Math.floor;
+      var fromCodePoint = function () {
+        var MAX_SIZE = 0x4000;
+        var codeUnits = [];
+        var highSurrogate;
+        var lowSurrogate;
+        var index = -1;
+        var length = arguments.length;
+        if (!length) {
+          return ''
+        }
+        var result = '';
+        while (++index < length) {
+          var codePoint = Number(arguments[index]);
+          if (
+            !isFinite(codePoint) || // `NaN`, `+Infinity`, or `-Infinity`
+            codePoint < 0 || // not a valid Unicode code point
+            codePoint > 0x10FFFF || // not a valid Unicode code point
+            floor(codePoint) !== codePoint // not an integer
+          ) {
+            throw RangeError('Invalid code point: ' + codePoint)
+          }
+          if (codePoint <= 0xFFFF) { // BMP code point
+            codeUnits.push(codePoint);
+          } else { // Astral code point; split in surrogate halves
+            // http://mathiasbynens.be/notes/javascript-encoding#surrogate-formulae
+            codePoint -= 0x10000;
+            highSurrogate = (codePoint >> 10) + 0xD800;
+            lowSurrogate = (codePoint % 0x400) + 0xDC00;
+            codeUnits.push(highSurrogate, lowSurrogate);
+          }
+          if (index + 1 === length || codeUnits.length > MAX_SIZE) {
+            result += stringFromCharCode.apply(null, codeUnits);
+            codeUnits.length = 0;
+          }
+        }
+        return result
+      };
+      /* istanbul ignore next */
+      if (Object.defineProperty) {
+        Object.defineProperty(String, 'fromCodePoint', {
+          value: fromCodePoint,
+          configurable: true,
+          writable: true
+        });
+      } else {
+        String.fromCodePoint = fromCodePoint;
+      }
+    }());
+  }
+})(exports);
+});
 
 function Document(dom) {
   this.root = dom;
@@ -52,2127 +1617,61 @@ Node.prototype.find = function (name) {
   return results;
 };
 
-exports.parseString = function parseString (str) {
+var parseString = function parseString (str) {
   return new Promise(function (resolve, reject) {
     var parser = getParser(resolve, reject);
-    parser.parseString(str);
+    parser.write(str).close();
   });
 };
 
 function getParser(callback, error) {
-  var dom = {};
-  var cur;
+  var cur = new Node();
+  cur.root = true;
 
-  return new xml.SaxParser(function(cb) {
-    cb.onStartDocument(function() {
-      cur = new Node();
-      cur.root = true;
-    });
-    cb.onEndDocument(function() {
+  var parser = sax.parser(true);
+
+  parser.onerror = function (e) {
+    error(e);
+  };
+
+  parser.onopentag = function (obj) {
+    var o = new Node(obj.name);
+    if (obj.attributes) {
+      o.attrs = obj.attributes;
+    }
+    o.parent = cur;
+    cur.children.push(o);
+    cur = o;
+  };
+
+  parser.onclosetag = function () {
+    cur = cur.parent;
+    if (!cur.parent) {
       callback(new Document(cur));
-    });
-    cb.onStartElementNS(function(elem, attrs, prefix, uri, namespaces) {
-      var o = new Node(elem);
-      attrs.forEach(function (a) {
-        o.attrs[a[0]] = a[1];
-      });
-      o.parent = cur;
-      cur.children.push(o);
-      cur = o;
-    });
-    cb.onEndElementNS(function(elem) {
-      cur = cur.parent;
-    });
-    cb.onCharacters(function(chars) {
-      if (!cur.value) {
-        cur.value = '';
-      }
-      cur.value += chars;
-    });
-    cb.onCdata(function(cdata) {
-      cur.cdata = cdata;
-    });
-    cb.onComment(function(msg) {
-    });
-    cb.onWarning(function(msg) {
-    });
-    cb.onError(function(msg) {
-      error(JSON.stringify(msg));
-    });
-  });
-}
-
-},{"node-xml":4}],3:[function(require,module,exports){
-
-},{}],4:[function(require,module,exports){
-// node-xml
-// An xml parser for node.js
-// (C) Rob Righter (@robrighter) 2009 - 2010, Licensed under the MIT-LICENSE
-// Contributions from David Joham
-
-
-(function () {
-
-// CONSTANTS
-var whitespace = "\n\r\t ";
-
-
-//XMLP is a pull-based parser. The calling application passes in a XML string
-//to the constructor, then repeatedly calls .next() to parse the next segment.
-//.next() returns a flag indicating what type of segment was found, and stores
-//data temporarily in couple member variables (name, content, array of
-//attributes), which can be accessed by several .get____() methods.
-//
-//Basically, XMLP is the lowest common denominator parser - an very simple
-//API which other wrappers can be built against.
-
-
-var XMLP = function(strXML) {
-    // Normalize line breaks
-    strXML = SAXStrings.replace(strXML, null, null, "\r\n", "\n");
-    strXML = SAXStrings.replace(strXML, null, null, "\r", "\n");
-
-    this.m_xml = strXML;
-    this.m_iP = 0;
-    this.m_iState = XMLP._STATE_PROLOG;
-    this.m_stack = new Stack();
-    this._clearAttributes();
-    this.m_pause = false;
-    this.m_preInterruptIState = XMLP._STATE_PROLOG;
-    this.m_namespaceList = new Array();
-    this.m_chunkTransitionContinuation = null;
-
-}
-
-
-// CONSTANTS    (these must be below the constructor)
-XMLP._NONE    = 0;
-XMLP._ELM_B   = 1;
-XMLP._ELM_E   = 2;
-XMLP._ELM_EMP = 3;
-XMLP._ATT     = 4;
-XMLP._TEXT    = 5;
-XMLP._ENTITY  = 6;
-XMLP._PI      = 7;
-XMLP._CDATA   = 8;
-XMLP._COMMENT = 9;
-XMLP._DTD     = 10;
-XMLP._ERROR   = 11;
-XMLP._INTERRUPT = 12;
-
-XMLP._CONT_XML = 0;
-XMLP._CONT_ALT = 1;
-
-XMLP._ATT_NAME = 0;
-XMLP._ATT_VAL  = 1;
-
-XMLP._STATE_PROLOG = 1;
-XMLP._STATE_DOCUMENT = 2;
-XMLP._STATE_MISC = 3;
-
-XMLP._errs = new Array();
-XMLP._errs[XMLP.ERR_CLOSE_PI       = 0 ] = "PI: missing closing sequence";
-XMLP._errs[XMLP.ERR_CLOSE_DTD      = 1 ] = "DTD: missing closing sequence";
-XMLP._errs[XMLP.ERR_CLOSE_COMMENT  = 2 ] = "Comment: missing closing sequence";
-XMLP._errs[XMLP.ERR_CLOSE_CDATA    = 3 ] = "CDATA: missing closing sequence";
-XMLP._errs[XMLP.ERR_CLOSE_ELM      = 4 ] = "Element: missing closing sequence";
-XMLP._errs[XMLP.ERR_CLOSE_ENTITY   = 5 ] = "Entity: missing closing sequence";
-XMLP._errs[XMLP.ERR_PI_TARGET      = 6 ] = "PI: target is required";
-XMLP._errs[XMLP.ERR_ELM_EMPTY      = 7 ] = "Element: cannot be both empty and closing";
-XMLP._errs[XMLP.ERR_ELM_NAME       = 8 ] = "Element: name must immediatly follow \"<\"";
-XMLP._errs[XMLP.ERR_ELM_LT_NAME    = 9 ] = "Element: \"<\" not allowed in element names";
-XMLP._errs[XMLP.ERR_ATT_VALUES     = 10] = "Attribute: values are required and must be in quotes";
-XMLP._errs[XMLP.ERR_ATT_LT_NAME    = 11] = "Element: \"<\" not allowed in attribute names";
-XMLP._errs[XMLP.ERR_ATT_LT_VALUE   = 12] = "Attribute: \"<\" not allowed in attribute values";
-XMLP._errs[XMLP.ERR_ATT_DUP        = 13] = "Attribute: duplicate attributes not allowed";
-XMLP._errs[XMLP.ERR_ENTITY_UNKNOWN = 14] = "Entity: unknown entity";
-XMLP._errs[XMLP.ERR_INFINITELOOP   = 15] = "Infininte loop";
-XMLP._errs[XMLP.ERR_DOC_STRUCTURE  = 16] = "Document: only comments, processing instructions, or whitespace allowed outside of document element";
-XMLP._errs[XMLP.ERR_ELM_NESTING    = 17] = "Element: must be nested correctly";
-
-
-
-XMLP.prototype.continueParsing = function(strXML) {
-
-    if(this.m_chunkTransitionContinuation){
-        strXML = this.m_chunkTransitionContinuation + strXML;
     }
-    // Normalize line breaks
-    strXML = SAXStrings.replace(strXML, null, null, "\r\n", "\n");
-    strXML = SAXStrings.replace(strXML, null, null, "\r", "\n");
-
-    this.m_xml = strXML;
-    this.m_iP = 0;
-    this.m_iState = XMLP._STATE_DOCUMENT;
-    //this.m_stack = new Stack();
-    //this._clearAttributes();
-    this.m_pause = false;
-    this.m_preInterruptIState = XMLP._STATE_PROLOG;
-    this.m_chunkTransitionContinuation = null;
-
-}
-
-XMLP.prototype._addAttribute = function(name, value) {
-    this.m_atts[this.m_atts.length] = new Array(name, value);
-}
-
-XMLP.prototype._checkStructure = function(iEvent) {
-	if(XMLP._STATE_PROLOG == this.m_iState) {
-		if((XMLP._TEXT == iEvent) || (XMLP._ENTITY == iEvent)) {
-            if(SAXStrings.indexOfNonWhitespace(this.getContent(), this.getContentBegin(), this.getContentEnd()) != -1) {
-				return this._setErr(XMLP.ERR_DOC_STRUCTURE);
-            }
-        }
-
-        if((XMLP._ELM_B == iEvent) || (XMLP._ELM_EMP == iEvent)) {
-            this.m_iState = XMLP._STATE_DOCUMENT;
-            // Don't return - fall through to next state
-        }
-    }
-    if(XMLP._STATE_DOCUMENT == this.m_iState) {
-        if((XMLP._ELM_B == iEvent) || (XMLP._ELM_EMP == iEvent)) {
-            this.m_stack.push(this.getName());
-        }
-
-        if((XMLP._ELM_E == iEvent) || (XMLP._ELM_EMP == iEvent)) {
-            var strTop = this.m_stack.pop();
-            if((strTop == null) || (strTop != this.getName())) {
-                return this._setErr(XMLP.ERR_ELM_NESTING);
-            }
-        }
-
-        if(this.m_stack.count() == 0) {
-            this.m_iState = XMLP._STATE_MISC;
-            return iEvent;
-        }
-    }
-    if(XMLP._STATE_MISC == this.m_iState) {
-		if((XMLP._ELM_B == iEvent) || (XMLP._ELM_E == iEvent) || (XMLP._ELM_EMP == iEvent) || (XMLP.EVT_DTD == iEvent)) {
-			return this._setErr(XMLP.ERR_DOC_STRUCTURE);
-        }
-
-        if((XMLP._TEXT == iEvent) || (XMLP._ENTITY == iEvent)) {
-			if(SAXStrings.indexOfNonWhitespace(this.getContent(), this.getContentBegin(), this.getContentEnd()) != -1) {
-				return this._setErr(XMLP.ERR_DOC_STRUCTURE);
-            }
-        }
-    }
-
-    return iEvent;
-
-}
-
-XMLP.prototype._clearAttributes = function() {
-    this.m_atts = new Array();
-}
-
-XMLP.prototype._findAttributeIndex = function(name) {
-    for(var i = 0; i < this.m_atts.length; i++) {
-        if(this.m_atts[i][XMLP._ATT_NAME] == name) {
-            return i;
-        }
-    }
-    return -1;
-
-}
-
-XMLP.prototype.getAttributeCount = function() {
-    return this.m_atts ? this.m_atts.length : 0;
-}
-
-XMLP.prototype.getAttributeName = function(index) {
-    return ((index < 0) || (index >= this.m_atts.length)) ? null : this.m_atts[index][XMLP._ATT_NAME];
-}
-
-XMLP.prototype.getAttributeValue = function(index) {
-    return ((index < 0) || (index >= this.m_atts.length)) ? null : __unescapeString(this.m_atts[index][XMLP._ATT_VAL]);
-}
-
-XMLP.prototype.getAttributeValueByName = function(name) {
-    return this.getAttributeValue(this._findAttributeIndex(name));
-}
-
-XMLP.prototype.getColumnNumber = function() {
-    return SAXStrings.getColumnNumber(this.m_xml, this.m_iP);
-}
-
-XMLP.prototype.getContent = function() {
-    return (this.m_cSrc == XMLP._CONT_XML) ? this.m_xml : this.m_cAlt;
-}
-
-XMLP.prototype.getContentBegin = function() {
-    return this.m_cB;
-}
-
-XMLP.prototype.getContentEnd = function() {
-    return this.m_cE;
-}
-
-XMLP.prototype.getLineNumber = function() {
-    return SAXStrings.getLineNumber(this.m_xml, this.m_iP);
-}
-
-XMLP.prototype.getName = function() {
-    return this.m_name;
-}
-
-XMLP.prototype.pause = function(){
-    this.m_pause = true;
-}
-
-XMLP.prototype.resume = function(){
-    this.m_pause = false;
-    this.m_iState = this.m_preInterruptIState;
-}
-
-XMLP.prototype.next = function() {
-    if(!this.m_pause){
-        return this._checkStructure(this._parse());
-    }
-    else{
-        //save off the current event loop state and set the state to interrupt
-        this.m_preInterruptIState = this.m_iState;
-        return XMLP._INTERRUPT;
-    }
-}
-
-XMLP.prototype._parse = function() {
-    if(this.m_iP == this.m_xml.length) {
-        return XMLP._NONE;
-    }
-
-    function _indexOf(needle, haystack, start) {
-        // This is an improvement over the native indexOf because it stops at the
-        // end of the needle and doesn't continue to the end of the haystack looking.
-        for(var i = 0; i < needle.length; i++) {
-            if(needle.charAt(i) != haystack.charAt(start + i))
-                return -1;
-        }
-        return start;
-    }
-
-    var fc = this.m_xml.charAt(this.m_iP);
-    if (fc !== '<' && fc !== '&') {
-        return this._parseText   (this.m_iP);
-    }
-    else if(this.m_iP == _indexOf("<?", this.m_xml, this.m_iP)) {
-        return this._parsePI     (this.m_iP + 2);
-    }
-    else if(this.m_iP == _indexOf("<!DOCTYPE", this.m_xml, this.m_iP)) {
-        return this._parseDTD    (this.m_iP + 9);
-    }
-    else if(this.m_iP == _indexOf("<!--", this.m_xml, this.m_iP)) {
-        return this._parseComment(this.m_iP + 4);
-    }
-    else if(this.m_iP == _indexOf("<![CDATA[", this.m_xml, this.m_iP)) {
-        return this._parseCDATA  (this.m_iP + 9);
-    }
-    else if(this.m_iP == _indexOf("<", this.m_xml, this.m_iP)) {
-        return this._parseElement(this.m_iP + 1);
-    }
-    else if(this.m_iP == _indexOf("&", this.m_xml, this.m_iP)) {
-        return this._parseEntity (this.m_iP + 1);
-    }
-    else{
-        return this._parseText   (this.m_iP);
-    }
-}
-
-////////// NAMESPACE SUPPORT //////////////////////////////////////////
-XMLP.prototype._parsePrefixAndElementName = function (elementlabel){
-    splits = elementlabel.split(':',2);
-    return { prefix : ((splits.length === 1) ? '' : splits[0]), name : ((splits.length === 1) ? elementlabel : splits[1]), };
-}
-
-XMLP.prototype._parseNamespacesAndAtts = function (atts){
-   //translate namespaces into objects with "prefix","uri", "scopetag" Add them to: this.m_namespaceList
-   //The function should return a new list of tag attributes with the namespaces filtered
-    that = this;
-    var newnamespaces = [];
-    var filteredatts = [];
-    atts.map(function (item){
-        if(item[0].slice(0,5) === "xmlns"){
-            newnamespaces.push({
-                                   prefix : item[0].slice(6),
-                                   uri : item[1],
-                                   scopetag : that.m_name,
-                                });
-        }
-        else{
-            filteredatts.push(item);
-        }
-        return "not used";
-    });
-    this.m_namespaceList = this.m_namespaceList.concat(newnamespaces);
-    return [ filteredatts, newnamespaces.map(function(item){return [item.prefix,item.uri];}) ];
-}
-
-XMLP.prototype._getContextualNamespace = function (prefix){
-    if(prefix !== ''){
-        for(item in this.m_namespaceList){
-            item = this.m_namespaceList[item];
-            if(item.prefix === prefix){
-                return item.uri;
-            }
-        }
-    }
-
-    //no match was found for the prefix so pop off the first non-prefix namespace
-    for(var i = (this.m_namespaceList.length-1); i>= 0; i--){
-        var item = this.m_namespaceList[i];
-        if(item.prefix === ''){
-            return item.uri;
-        }
-    }
-
-    //still nothing, lets just return an empty string
-    return '';
-}
-
-XMLP.prototype._removeExpiredNamesapces = function (closingtagname) {
-    //remove the expiring namespaces from the list (you can id them by scopetag)
-    var keeps = [];
-    this.m_namespaceList.map(function (item){
-        if(item.scopetag !== closingtagname){
-            keeps.push(item);
-        }
-    });
-
-    this.m_namespaceList = keeps;
-
-}
-
-////////////////////////////////////////////////////////////////////////
-
-
-XMLP.prototype._parseAttribute = function(iB, iE) {
-    var iNB, iNE, iEq, iVB, iVE;
-    var cQuote, strN, strV;
-
-	this.m_cAlt = ""; //resets the value so we don't use an old one by accident (see testAttribute7 in the test suite)
-
-	iNB = SAXStrings.indexOfNonWhitespace(this.m_xml, iB, iE);
-    if((iNB == -1) ||(iNB >= iE)) {
-        return iNB;
-    }
-
-    iEq = this.m_xml.indexOf("=", iNB);
-    if((iEq == -1) || (iEq > iE)) {
-        return this._setErr(XMLP.ERR_ATT_VALUES);
-    }
-
-    iNE = SAXStrings.lastIndexOfNonWhitespace(this.m_xml, iNB, iEq);
-
-    iVB = SAXStrings.indexOfNonWhitespace(this.m_xml, iEq + 1, iE);
-    if((iVB == -1) ||(iVB > iE)) {
-        return this._setErr(XMLP.ERR_ATT_VALUES);
-    }
-
-    cQuote = this.m_xml.charAt(iVB);
-    if(SAXStrings.QUOTES.indexOf(cQuote) == -1) {
-        return this._setErr(XMLP.ERR_ATT_VALUES);
-    }
-
-    iVE = this.m_xml.indexOf(cQuote, iVB + 1);
-    if((iVE == -1) ||(iVE > iE)) {
-        return this._setErr(XMLP.ERR_ATT_VALUES);
-    }
-
-    strN = this.m_xml.substring(iNB, iNE + 1);
-    strV = this.m_xml.substring(iVB + 1, iVE);
-
-    if(strN.indexOf("<") != -1) {
-        return this._setErr(XMLP.ERR_ATT_LT_NAME);
-    }
-
-    if(strV.indexOf("<") != -1) {
-        return this._setErr(XMLP.ERR_ATT_LT_VALUE);
-    }
-
-    strV = SAXStrings.replace(strV, null, null, "\n", " ");
-    strV = SAXStrings.replace(strV, null, null, "\t", " ");
-	iRet = this._replaceEntities(strV);
-    if(iRet == XMLP._ERROR) {
-        return iRet;
-    }
-
-    strV = this.m_cAlt;
-
-    if(this._findAttributeIndex(strN) == -1) {
-        this._addAttribute(strN, strV);
-    }
-    else {
-        return this._setErr(XMLP.ERR_ATT_DUP);
-    }
-
-    this.m_iP = iVE + 2;
-
-    return XMLP._ATT;
-
-}
-
-XMLP.prototype._parseCDATA = function(iB) {
-    var iE = this.m_xml.indexOf("]]>", iB);
-    if (iE == -1) {
-        //This item never closes, although it could be a malformed document, we will assume that we are mid-chunck, save the string and reurn as interrupted
-        this.m_chunkTransitionContinuation = this.m_xml.slice(iB-9);//the '-<![CDATA[ adds the '<!DOCTYPE' back into the string
-        return XMLP._INTERRUPT;
-        //return this._setErr(XMLP.ERR_CLOSE_CDATA);
-    }
-
-    this._setContent(XMLP._CONT_XML, iB, iE);
-
-    this.m_iP = iE + 3;
-
-    return XMLP._CDATA;
-
-}
-
-XMLP.prototype._parseComment = function(iB) {
-    var iE = this.m_xml.indexOf("-" + "->", iB);
-    if (iE == -1) {
-        //This item never closes, although it could be a malformed document, we will assume that we are mid-chunck, save the string and reurn as interrupted
-        this.m_chunkTransitionContinuation = this.m_xml.slice(iB-4);//the '-4' adds the '<!--' back into the string
-        return XMLP._INTERRUPT;
-        //return this._setErr(XMLP.ERR_CLOSE_COMMENT);
-    }
-
-    this._setContent(XMLP._CONT_XML, iB, iE);
-
-    this.m_iP = iE + 3;
-
-    return XMLP._COMMENT;
-
-}
-
-XMLP.prototype._parseDTD = function(iB) {
-    // Eat DTD
-    var iE, strClose, iInt, iLast;
-
-    iE = this.m_xml.indexOf(">", iB);
-    if(iE == -1) {
-        //This item never closes, although it could be a malformed document, we will assume that we are mid-chunck, save the string and reurn as interrupted
-        this.m_chunkTransitionContinuation = this.m_xml.slice(iB-9);//the '-9' adds the '<!DOCTYPE' back into the string
-        return XMLP._INTERRUPT;
-        //return this._setErr(XMLP.ERR_CLOSE_DTD);
-    }
-
-    iInt = this.m_xml.indexOf("[", iB);
-    strClose = ((iInt != -1) && (iInt < iE)) ? "]>" : ">";
-
-    while(true) {
-        // DEBUG: Remove
-        if(iE == iLast) {
-            return this._setErr(XMLP.ERR_INFINITELOOP);
-        }
-
-        iLast = iE;
-        // DEBUG: Remove End
-
-        iE = this.m_xml.indexOf(strClose, iB);
-        if(iE == -1) {
-            return this._setErr(XMLP.ERR_CLOSE_DTD);
-        }
-
-        // Make sure it is not the end of a CDATA section
-        if (this.m_xml.substring(iE - 1, iE + 2) != "]]>") {
-            break;
-        }
-    }
-
-    this.m_iP = iE + strClose.length;
-
-    return XMLP._DTD;
-
-}
-
-XMLP.prototype._parseElement = function(iB) {
-    util = require('util');
-    var iE, iDE, iNE, iRet;
-    var iType, strN, iLast;
-
-    iDE = iE = this.m_xml.indexOf(">", iB);
-    if(iE == -1) {
-        //This element never closes, although it could be a malformed document, we will assume that we are mid-chunck, save the string and reurn as interrupted
-        this.m_chunkTransitionContinuation = this.m_xml.slice(iB-1);//the '-1' adds the '<' back into the string
-        return XMLP._INTERRUPT;
-        //return this._setErr(XMLP.ERR_CLOSE_ELM);
-    }
-
-    if(this.m_xml.charAt(iB) == "/") {
-        iType = XMLP._ELM_E;
-        iB++;
-    } else {
-        iType = XMLP._ELM_B;
-    }
-
-    if(this.m_xml.charAt(iE - 1) == "/") {
-        if(iType == XMLP._ELM_E) {
-            return this._setErr(XMLP.ERR_ELM_EMPTY);
-        }
-        iType = XMLP._ELM_EMP;
-        iDE--;
-    }
-
-    iDE = SAXStrings.lastIndexOfNonWhitespace(this.m_xml, iB, iDE);
-
-    //djohack
-    //hack to allow for elements with single character names to be recognized
-
-    if (iE - iB != 1 ) {
-        if(SAXStrings.indexOfNonWhitespace(this.m_xml, iB, iDE) != iB) {
-            return this._setErr(XMLP.ERR_ELM_NAME);
-        }
-    }
-    // end hack -- original code below
-
-    /*
-    if(SAXStrings.indexOfNonWhitespace(this.m_xml, iB, iDE) != iB)
-        return this._setErr(XMLP.ERR_ELM_NAME);
-    */
-    this._clearAttributes();
-
-    iNE = SAXStrings.indexOfWhitespace(this.m_xml, iB, iDE);
-    if(iNE == -1) {
-        iNE = iDE + 1;
-    }
-    else {
-        this.m_iP = iNE;
-        while(this.m_iP < iDE) {
-            // DEBUG: Remove
-            if(this.m_iP == iLast) return this._setErr(XMLP.ERR_INFINITELOOP);
-            iLast = this.m_iP;
-            // DEBUG: Remove End
-
-
-            iRet = this._parseAttribute(this.m_iP, iDE);
-            if(iRet == XMLP._ERROR) return iRet;
-        }
-    }
-
-    strN = this.m_xml.substring(iB, iNE);
-
-    if(strN.indexOf("<") != -1) {
-        return this._setErr(XMLP.ERR_ELM_LT_NAME);
-    }
-
-    this.m_name = strN;
-    this.m_iP = iE + 1;
-
-    return iType;
-
-}
-
-XMLP.prototype._parseEntity = function(iB) {
-    var iE = this.m_xml.indexOf(";", iB);
-    if(iE == -1) {
-        //This item never closes, although it could be a malformed document, we will assume that we are mid-chunck, save the string and reurn as interrupted
-        this.m_chunkTransitionContinuation = this.m_xml.slice(iB-1);//the '-1' adds the '&' back into the string
-        return XMLP._INTERRUPT;
-        //return this._setErr(XMLP.ERR_CLOSE_ENTITY);
-    }
-
-    this.m_iP = iE + 1;
-
-    return this._replaceEntity(this.m_xml, iB, iE);
-
-}
-
-XMLP.prototype._parsePI = function(iB) {
-    var iE, iTB, iTE, iCB, iCE;
-
-    iE = this.m_xml.indexOf("?>", iB);
-    if(iE   == -1) {
-        //This item never closes, although it could be a malformed document, we will assume that we are mid-chunck, save the string and reurn as interrupted
-        this.m_chunkTransitionContinuation = this.m_xml.slice(iB-2);//the '-2' adds the '?>' back into the string
-        return XMLP._INTERRUPT;
-        return this._setErr(XMLP.ERR_CLOSE_PI);
-    }
-
-    iTB = SAXStrings.indexOfNonWhitespace(this.m_xml, iB, iE);
-    if(iTB == -1) {
-        return this._setErr(XMLP.ERR_PI_TARGET);
-    }
-
-    iTE = SAXStrings.indexOfWhitespace(this.m_xml, iTB, iE);
-    if(iTE  == -1) {
-        iTE = iE;
-    }
-
-    iCB = SAXStrings.indexOfNonWhitespace(this.m_xml, iTE, iE);
-    if(iCB == -1) {
-        iCB = iE;
-    }
-
-    iCE = SAXStrings.lastIndexOfNonWhitespace(this.m_xml, iCB, iE);
-    if(iCE  == -1) {
-        iCE = iE - 1;
-    }
-
-    this.m_name = this.m_xml.substring(iTB, iTE);
-    this._setContent(XMLP._CONT_XML, iCB, iCE + 1);
-    this.m_iP = iE + 2;
-
-    return XMLP._PI;
-
-}
-
-XMLP.prototype._parseText = function(iB) {
-    var iE, ch;
-
-    for (iE=iB; iE<this.m_xml.length; ++iE) {
-        ch = this.m_xml.charAt(iE);
-        if (ch === '<' || ch === '&') {
-            break;
-        }
-    }
-    
-    this._setContent(XMLP._CONT_XML, iB, iE);
-
-    this.m_iP = iE;
-
-    return XMLP._TEXT;
-
-}
-
-XMLP.prototype._replaceEntities = function(strD, iB, iE) {
-    if(SAXStrings.isEmpty(strD)) return "";
-    iB = iB || 0;
-    iE = iE || strD.length;
-
-
-    var iEB, iEE, strRet = "";
-
-    iEB = strD.indexOf("&", iB);
-    iEE = iB;
-
-    while((iEB > 0) && (iEB < iE)) {
-        strRet += strD.substring(iEE, iEB);
-
-        iEE = strD.indexOf(";", iEB) + 1;
-
-        if((iEE == 0) || (iEE > iE)) {
-            return this._setErr(XMLP.ERR_CLOSE_ENTITY);
-        }
-
-        iRet = this._replaceEntity(strD, iEB + 1, iEE - 1);
-        if(iRet == XMLP._ERROR) {
-            return iRet;
-        }
-
-        strRet += this.m_cAlt;
-
-        iEB = strD.indexOf("&", iEE);
-    }
-
-    if(iEE != iE) {
-        strRet += strD.substring(iEE, iE);
-    }
-
-    this._setContent(XMLP._CONT_ALT, strRet);
-
-    return XMLP._ENTITY;
-
-}
-
-XMLP.prototype._replaceEntity = function(strD, iB, iE) {
-    if(SAXStrings.isEmpty(strD)) return -1;
-    iB = iB || 0;
-    iE = iE || strD.length;
-
-    switch(strD.substring(iB, iE)) {
-        case "amp":  strEnt = "&";  break;
-        case "lt":   strEnt = "<";  break;
-        case "gt":   strEnt = ">";  break;
-        case "apos": strEnt = "'";  break;
-        case "quot": strEnt = "\""; break;
-        case "nbsp":strEnt = ''; break;
-        case "lt":strEnt = '<'; break;
-        case "gt":strEnt = '>'; break;
-        case "amp":strEnt = '&'; break;
-        case "cent":strEnt = "¢"; break;
-        case "pound":strEnt = '£'; break;
-        case "yen":strEnt = '¥'; break;
-        case "euro":strEnt = '€'; break;
-        case "sect":strEnt = '§'; break;
-        case "copy":strEnt = '©'; break;
-        case "reg":strEnt = '®'; break;
-        default:
-            if(strD.charAt(iB) == "#") {
-                strEnt = String.fromCharCode(parseInt(strD.substring(iB + 1, iE)));
-            } else {
-                strEnt = ' ';
-                //return this._setErr(XMLP.ERR_ENTITY_UNKNOWN);
-            }
-        break;
-    }
-    this._setContent(XMLP._CONT_ALT, strEnt);
-
-    return XMLP._ENTITY;
-}
-
-XMLP.prototype._setContent = function(iSrc) {
-    var args = arguments;
-
-    if(XMLP._CONT_XML == iSrc) {
-        this.m_cAlt = null;
-        this.m_cB = args[1];
-        this.m_cE = args[2];
-    } else {
-        this.m_cAlt = args[1];
-        this.m_cB = 0;
-        this.m_cE = args[1].length;
-    }
-    this.m_cSrc = iSrc;
-
-}
-
-XMLP.prototype._setErr = function(iErr) {
-    var strErr = XMLP._errs[iErr];
-
-    this.m_cAlt = strErr;
-    this.m_cB = 0;
-    this.m_cE = strErr.length;
-    this.m_cSrc = XMLP._CONT_ALT;
-
-    return XMLP._ERROR;
-
-}  // end function _setErr
-
-
-//SaxParser is an object that basically wraps an XMLP instance, and provides an
-//event-based interface for parsing. This is the object users interact with when coding
-//with XML for <SCRIPT>
-var SaxParser = function(eventhandlerfactory) {
-
-    var eventhandler = new function(){
-
-    }
-
-    var thehandler = function() {};
-    thehandler.prototype.onStartDocument = function (funct){
-      eventhandler.onStartDocument = funct;
-    }
-    thehandler.prototype.onEndDocument = function (funct){
-      eventhandler.onEndDocument = funct;
-    }
-    thehandler.prototype.onStartElementNS = function (funct){
-      eventhandler.onStartElementNS = funct;
-    }
-    thehandler.prototype.onEndElementNS = function (funct){
-      eventhandler.onEndElementNS = funct;
-    }
-    thehandler.prototype.onCharacters = function(funct) {
-      eventhandler.onCharacters = funct;
-    }
-    thehandler.prototype.onCdata = function(funct) {
-      eventhandler.onCdata = funct;
-    }
-    thehandler.prototype.onComment = function(funct) {
-      eventhandler.onComment = funct;
-    }
-    thehandler.prototype.onWarning = function(funct) {
-      eventhandler.onWarning = funct;
-    }
-
-    thehandler.prototype.onError = function(funct) {
-      eventhandler.onError = funct;
-    }
-
-
-    eventhandlerfactory(new thehandler());
-    //eventhandler = eventhandler(eventhandler);
-    this.m_hndDoc = eventhandler;
-    this.m_hndErr = eventhandler;
-    this.m_hndLex = eventhandler;
-    this.m_interrupted = false;
-}
-
-
-// CONSTANTS    (these must be below the constructor)
-SaxParser.DOC_B = 1;
-SaxParser.DOC_E = 2;
-SaxParser.ELM_B = 3;
-SaxParser.ELM_E = 4;
-SaxParser.CHARS = 5;
-SaxParser.PI    = 6;
-SaxParser.CD_B  = 7;
-SaxParser.CD_E  = 8;
-SaxParser.CMNT  = 9;
-SaxParser.DTD_B = 10;
-SaxParser.DTD_E = 11;
-
-SaxParser.prototype.parseFile = function(filename) { //This function will only work in the node.js environment.
-    var fs = require('fs');
-    var that = this;
-    fs.readFile(filename, function (err, data) {
-      that.parseString(data);
-    });
-}
-
-
-SaxParser.prototype.parseString = function(strD) {
-    util = require('util');
-    var that = this;
-    var startnew = true;
-    if(!that.m_parser){
-        that.m_parser = new XMLP(strD);
-        startnew = false;
-    }
-    else{
-        that.m_parser.continueParsing(strD);
-        startnew = true;
-    }
-
-    //if(that.m_hndDoc && that.m_hndDoc.setDocumentLocator) {
-    //    that.m_hndDoc.setDocumentLocator(that);
-    //}
-
-    that.m_bErr = false;
-
-    if(!that.m_bErr && !startnew) {
-        that._fireEvent(SaxParser.DOC_B);
-    }
-    that._parseLoop();
-    if(!that.m_bErr && !that.m_interrupted) {
-        that._fireEvent(SaxParser.DOC_E);
-    }
-
-    that.m_xml = null;
-    that.m_iP = 0;
-    that.m_interrupted = false;
-}
-
-SaxParser.prototype.pause = function() {
-    this.m_parser.pause();
-}
-
-SaxParser.prototype.resume = function() {
-    //reset the state
-    this.m_parser.resume();
-    this.m_interrupted = false;
-    
-    //now start up the parse loop
-    var that = this;
-    setTimeout(function(){
-            that._parseLoop();
-            if(!that.m_bErr && !that.m_interrupted) {
-                that._fireEvent(SaxParser.DOC_E);
-            }
-    }, 0);
-}
-
-SaxParser.prototype.setDocumentHandler = function(hnd) {
-    this.m_hndDoc = hnd;
-}
-
-SaxParser.prototype.setErrorHandler = function(hnd) {
-    this.m_hndErr = hnd;
-}
-
-SaxParser.prototype.setLexicalHandler = function(hnd) {
-    this.m_hndLex = hnd;
-}
-
-SaxParser.prototype.getColumnNumber = function() {
-    return this.m_parser.getColumnNumber();
-}
-
-SaxParser.prototype.getLineNumber = function() {
-    return this.m_parser.getLineNumber();
-}
-
-SaxParser.prototype.getMessage = function() {
-    return this.m_strErrMsg;
-}
-
-SaxParser.prototype.getPublicId = function() {
-    return null;
-}
-
-SaxParser.prototype.getSystemId = function() {
-    return null;
-}
-
-SaxParser.prototype.getLength = function() {
-    return this.m_parser.getAttributeCount();
-}
-
-SaxParser.prototype.getName = function(index) {
-    return this.m_parser.getAttributeName(index);
-}
-
-SaxParser.prototype.getValue = function(index) {
-    return this.m_parser.getAttributeValue(index);
-}
-
-SaxParser.prototype.getValueByName = function(name) {
-    return this.m_parser.getAttributeValueByName(name);
-}
-
-SaxParser.prototype._fireError = function(strMsg) {
-    this.m_strErrMsg = strMsg;
-    this.m_bErr = true;
-
-    if(this.m_hndErr && this.m_hndErr.onError) {
-        this.m_hndErr.onError(this.m_strErrMsg);
-    }
-}
-
-
-
-SaxParser.prototype._fireEvent = function(iEvt) {
-    var hnd, func, args = arguments, iLen = args.length - 1;
-
-
-    if(this.m_bErr) return;
-
-    if(SaxParser.DOC_B == iEvt) {
-        func = "onStartDocument";         hnd = this.m_hndDoc;
-    }
-    else if (SaxParser.DOC_E == iEvt) {
-        func = "onEndDocument";           hnd = this.m_hndDoc;
-    }
-    else if (SaxParser.ELM_B == iEvt) {
-        func = "onStartElementNS";          hnd = this.m_hndDoc;
-    }
-    else if (SaxParser.ELM_E == iEvt) {
-        func = "onEndElementNS";            hnd = this.m_hndDoc;
-    }
-    else if (SaxParser.CHARS == iEvt) {
-        func = "onCharacters";            hnd = this.m_hndDoc;
-    }
-    else if (SaxParser.PI    == iEvt) {
-        func = "processingInstruction"; hnd = this.m_hndDoc;
-    }
-    else if (SaxParser.CD_B  == iEvt) {
-        func = "onCdata";            hnd = this.m_hndLex;
-    }
-    else if (SaxParser.CD_E  == iEvt) {
-        func = "onEndCDATA";              hnd = this.m_hndLex;
-    }
-    else if (SaxParser.CMNT  == iEvt) {
-        func = "onComment";               hnd = this.m_hndLex;
-    }
-
-    if(hnd && hnd[func]) {
-        if(0 == iLen) {
-            hnd[func]();
-        }
-        else if (1 == iLen) {
-            hnd[func](args[1]);
-        }
-        else if (2 == iLen) {
-            hnd[func](args[1], args[2]);
-        }
-        else if (3 == iLen) {
-            hnd[func](args[1], args[2], args[3]);
-        }
-        else if (4 == iLen) {
-            hnd[func](args[1], args[2], args[3], args[4]);
-        }
-        else if (5 == iLen) {
-            hnd[func](args[1], args[2], args[3], args[4], args[5]);
-        }
-        else if (6 == iLen) {
-            hnd[func](args[1], args[2], args[3], args[4], args[5], args[6]);
-        }
-    }
-
-}
-
-
-
-
-SaxParser.prototype._parseLoop = function(parser) {
-    var iEvent, parser;
-
-    parser = this.m_parser;
-    while(!this.m_bErr) {
-        iEvent = parser.next();
-
-        if(iEvent == XMLP._ELM_B) {
-            theatts = this.m_parser.m_atts;
-            nameobject = parser._parsePrefixAndElementName(parser.getName());
-            theattsandnamespace = parser._parseNamespacesAndAtts(theatts);
-            var theuri = parser._getContextualNamespace(nameobject.prefix);
-            this._fireEvent(SaxParser.ELM_B, nameobject.name, theattsandnamespace[0], (nameobject.prefix === '')? null : nameobject.prefix, (theuri === '')? null : theuri ,theattsandnamespace[1] );
-        }
-        else if(iEvent == XMLP._ELM_E) {
-            nameobject = parser._parsePrefixAndElementName(parser.getName());
-            var theuri = parser._getContextualNamespace(nameobject.prefix);
-            parser._removeExpiredNamesapces(parser.getName());
-            this._fireEvent(SaxParser.ELM_E, nameobject.name, (nameobject.prefix === '')? null : nameobject.prefix, (theuri === '')? null : theuri);
-        }
-        else if(iEvent == XMLP._ELM_EMP) {
-            //this is both a begin and end element
-            theatts = this.m_parser.m_atts;
-            nameobject = parser._parsePrefixAndElementName(parser.getName());
-            theattsandnamespace = parser._parseNamespacesAndAtts(theatts);
-            var theuri = parser._getContextualNamespace(nameobject.prefix);
-            this._fireEvent(SaxParser.ELM_B, nameobject.name, theattsandnamespace[0], (nameobject.prefix === '')? null : nameobject.prefix, (theuri === '')? null : theuri ,theattsandnamespace[1], true );
-
-            parser._removeExpiredNamesapces(parser.getName());
-            this._fireEvent(SaxParser.ELM_E, nameobject.name, (nameobject.prefix === '')? null : nameobject.prefix, (theuri === '')? null : theuri, true);
-            //this._fireEvent(SaxParser.ELM_B, parser.getName(), this.m_parser.m_atts.map(function(item){return { name : item[0], value : item[1], };}) );
-            //this._fireEvent(SaxParser.ELM_E, parser.getName());
-        }
-        else if(iEvent == XMLP._TEXT) {
-            this._fireEvent(SaxParser.CHARS, parser.getContent().slice(parser.getContentBegin(),parser.getContentEnd()));
-        }
-        else if(iEvent == XMLP._ENTITY) {
-            this._fireEvent(SaxParser.CHARS, parser.getContent(), parser.getContentBegin(), parser.getContentEnd() - parser.getContentBegin());
-        }
-        else if(iEvent == XMLP._PI) {
-            this._fireEvent(SaxParser.PI, parser.getName(), parser.getContent().substring(parser.getContentBegin(), parser.getContentEnd()));
-        }
-        else if(iEvent == XMLP._CDATA) {
-            this._fireEvent(SaxParser.CD_B, parser.getContent().slice(parser.getContentBegin(),parser.getContentEnd()));
-            //this._fireEvent(SaxParser.CHARS, parser.getContent(), parser.getContentBegin(), parser.getContentEnd() - parser.getContentBegin());
-            //this._fireEvent(SaxParser.CD_E);
-        }
-        else if(iEvent == XMLP._COMMENT) {
-            this._fireEvent(SaxParser.CMNT, parser.getContent().slice(parser.getContentBegin(),parser.getContentEnd()));
-        }
-        else if(iEvent == XMLP._DTD) {
-        }
-        else if(iEvent == XMLP._ERROR) {
-            this._fireError(parser.getContent());
-        }
-        else if(iEvent == XMLP._INTERRUPT){
-            this.m_interrupted = true;
-            return;//just return and wait to be restarted
-        }
-        else if(iEvent == XMLP._NONE) {
-            return;
-        }
-    }
-
-}
-
-//SAXStrings: a useful object containing string manipulation functions
-var SAXStrings = function() {
-//This is the constructor of the SAXStrings object
-}
-
-
-// CONSTANTS    (these must be below the constructor)
-SAXStrings.WHITESPACE = " \t\n\r";
-SAXStrings.QUOTES = "\"'";
-
-
-SAXStrings.getColumnNumber = function(strD, iP) {
-    if(SAXStrings.isEmpty(strD)) {
-        return -1;
-    }
-    iP = iP || strD.length;
-
-    var arrD = strD.substring(0, iP).split("\n");
-    var strLine = arrD[arrD.length - 1];
-    arrD.length--;
-    var iLinePos = arrD.join("\n").length;
-
-    return iP - iLinePos;
-
-}
-
-SAXStrings.getLineNumber = function(strD, iP) {
-    if(SAXStrings.isEmpty(strD)) {
-        return -1;
-    }
-    iP = iP || strD.length;
-
-    return strD.substring(0, iP).split("\n").length
-}
-
-SAXStrings.indexOfNonWhitespace = function(strD, iB, iE) {
-    if(SAXStrings.isEmpty(strD)) {
-        return -1;
-    }
-    iB = iB || 0;
-    iE = iE || strD.length;
-
-    for(var i = iB; i < iE; i++){
-        if(SAXStrings.WHITESPACE.indexOf(strD.charAt(i)) == -1) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-SAXStrings.indexOfWhitespace = function(strD, iB, iE) {
-    if(SAXStrings.isEmpty(strD)) {
-        return -1;
-    }
-    iB = iB || 0;
-    iE = iE || strD.length;
-
-    for(var i = iB; i < iE; i++) {
-        if(SAXStrings.WHITESPACE.indexOf(strD.charAt(i)) != -1) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-SAXStrings.isEmpty = function(strD) {
-    return (strD == null) || (strD.length == 0);
-}
-
-SAXStrings.lastIndexOfNonWhitespace = function(strD, iB, iE) {
-    if(SAXStrings.isEmpty(strD)) {
-        return -1;
-    }
-    iB = iB || 0;
-    iE = iE || strD.length;
-
-    for(var i = iE - 1; i >= iB; i--){
-        if(SAXStrings.WHITESPACE.indexOf(strD.charAt(i)) == -1){
-            return i;
-        }
-    }
-    return -1;
-}
-
-SAXStrings.replace = function(strD, iB, iE, strF, strR) {
-    if(SAXStrings.isEmpty(strD)) {
-        return "";
-    }
-    iB = iB || 0;
-    iE = iE || strD.length;
-
-    return strD.toString().substring(iB, iE).split(strF).join(strR);
-
-}
-
-var Stack = function() {
-    this.m_arr = new Array();
-}
-
-Stack.prototype.clear = function() {
-    this.m_arr = new Array();
-}
-
-Stack.prototype.count = function() {
-    return this.m_arr.length;
-}
-
-Stack.prototype.destroy = function() {
-    this.m_arr = null;
-}
-
-Stack.prototype.peek = function() {
-    if(this.m_arr.length == 0) {
-        return null;
-    }
-
-    return this.m_arr[this.m_arr.length - 1];
-
-}
-
-Stack.prototype.pop = function() {
-    if(this.m_arr.length == 0) {
-        return null;
-    }
-
-    var o = this.m_arr[this.m_arr.length - 1];
-    this.m_arr.length--;
-    return o;
-
-}
-
-Stack.prototype.push = function(o) {
-    this.m_arr[this.m_arr.length] = o;
-}
-
-// CONVENIENCE FUNCTIONS
-function isEmpty(str) {
-     return (str==null) || (str.length==0);
-}
-
-
-function trim(trimString, leftTrim, rightTrim) {
-    if (isEmpty(trimString)) {
-        return "";
-    }
-
-    // the general focus here is on minimal method calls - hence only one
-    // substring is done to complete the trim.
-
-    if (leftTrim == null) {
-        leftTrim = true;
-    }
-
-    if (rightTrim == null) {
-        rightTrim = true;
-    }
-
-    var left=0;
-    var right=0;
-    var i=0;
-    var k=0;
-
-
-    // modified to properly handle strings that are all whitespace
-    if (leftTrim == true) {
-        while ((i<trimString.length) && (whitespace.indexOf(trimString.charAt(i++))!=-1)) {
-            left++;
-        }
-    }
-    if (rightTrim == true) {
-        k=trimString.length-1;
-        while((k>=left) && (whitespace.indexOf(trimString.charAt(k--))!=-1)) {
-            right++;
-        }
-    }
-    return trimString.substring(left, trimString.length - right);
-}
-
-function __escapeString(str) {
-
-    var escAmpRegEx = /&/g;
-    var escLtRegEx = /</g;
-    var escGtRegEx = />/g;
-    var quotRegEx = /"/g;
-    var aposRegEx = /'/g;
-
-    str = str.replace(escAmpRegEx, "&amp;");
-    str = str.replace(escLtRegEx, "&lt;");
-    str = str.replace(escGtRegEx, "&gt;");
-    str = str.replace(quotRegEx, "&quot;");
-    str = str.replace(aposRegEx, "&apos;");
-
-  return str;
-}
-
-function __unescapeString(str) {
-
-    var escAmpRegEx = /&amp;/g;
-    var escLtRegEx = /&lt;/g;
-    var escGtRegEx = /&gt;/g;
-    var quotRegEx = /&quot;/g;
-    var aposRegEx = /&apos;/g;
-
-    str = str.replace(escAmpRegEx, "&");
-    str = str.replace(escLtRegEx, "<");
-    str = str.replace(escGtRegEx, ">");
-    str = str.replace(quotRegEx, "\"");
-    str = str.replace(aposRegEx, "'");
-
-  return str;
-}
-
-exports.SaxParser = SaxParser;
-
-
-})()
-
-},{"fs":3,"util":8}],5:[function(require,module,exports){
-// shim for using process in browser
-var process = module.exports = {};
-
-// cached from whatever global is present so that test runners that stub it
-// don't break things.  But we need to wrap it in a try catch in case it is
-// wrapped in strict mode code which doesn't define any globals.  It's inside a
-// function because try/catches deoptimize in certain engines.
-
-var cachedSetTimeout;
-var cachedClearTimeout;
-
-function defaultSetTimout() {
-    throw new Error('setTimeout has not been defined');
-}
-function defaultClearTimeout () {
-    throw new Error('clearTimeout has not been defined');
-}
-(function () {
-    try {
-        if (typeof setTimeout === 'function') {
-            cachedSetTimeout = setTimeout;
-        } else {
-            cachedSetTimeout = defaultSetTimout;
-        }
-    } catch (e) {
-        cachedSetTimeout = defaultSetTimout;
-    }
-    try {
-        if (typeof clearTimeout === 'function') {
-            cachedClearTimeout = clearTimeout;
-        } else {
-            cachedClearTimeout = defaultClearTimeout;
-        }
-    } catch (e) {
-        cachedClearTimeout = defaultClearTimeout;
-    }
-} ())
-function runTimeout(fun) {
-    if (cachedSetTimeout === setTimeout) {
-        //normal enviroments in sane situations
-        return setTimeout(fun, 0);
-    }
-    // if setTimeout wasn't available but was latter defined
-    if ((cachedSetTimeout === defaultSetTimout || !cachedSetTimeout) && setTimeout) {
-        cachedSetTimeout = setTimeout;
-        return setTimeout(fun, 0);
-    }
-    try {
-        // when when somebody has screwed with setTimeout but no I.E. maddness
-        return cachedSetTimeout(fun, 0);
-    } catch(e){
-        try {
-            // When we are in I.E. but the script has been evaled so I.E. doesn't trust the global object when called normally
-            return cachedSetTimeout.call(null, fun, 0);
-        } catch(e){
-            // same as above but when it's a version of I.E. that must have the global object for 'this', hopfully our context correct otherwise it will throw a global error
-            return cachedSetTimeout.call(this, fun, 0);
-        }
-    }
-
-
-}
-function runClearTimeout(marker) {
-    if (cachedClearTimeout === clearTimeout) {
-        //normal enviroments in sane situations
-        return clearTimeout(marker);
-    }
-    // if clearTimeout wasn't available but was latter defined
-    if ((cachedClearTimeout === defaultClearTimeout || !cachedClearTimeout) && clearTimeout) {
-        cachedClearTimeout = clearTimeout;
-        return clearTimeout(marker);
-    }
-    try {
-        // when when somebody has screwed with setTimeout but no I.E. maddness
-        return cachedClearTimeout(marker);
-    } catch (e){
-        try {
-            // When we are in I.E. but the script has been evaled so I.E. doesn't  trust the global object when called normally
-            return cachedClearTimeout.call(null, marker);
-        } catch (e){
-            // same as above but when it's a version of I.E. that must have the global object for 'this', hopfully our context correct otherwise it will throw a global error.
-            // Some versions of I.E. have different rules for clearTimeout vs setTimeout
-            return cachedClearTimeout.call(this, marker);
-        }
-    }
-
-
-
-}
-var queue = [];
-var draining = false;
-var currentQueue;
-var queueIndex = -1;
-
-function cleanUpNextTick() {
-    if (!draining || !currentQueue) {
-        return;
-    }
-    draining = false;
-    if (currentQueue.length) {
-        queue = currentQueue.concat(queue);
-    } else {
-        queueIndex = -1;
-    }
-    if (queue.length) {
-        drainQueue();
-    }
-}
-
-function drainQueue() {
-    if (draining) {
-        return;
-    }
-    var timeout = runTimeout(cleanUpNextTick);
-    draining = true;
-
-    var len = queue.length;
-    while(len) {
-        currentQueue = queue;
-        queue = [];
-        while (++queueIndex < len) {
-            if (currentQueue) {
-                currentQueue[queueIndex].run();
-            }
-        }
-        queueIndex = -1;
-        len = queue.length;
-    }
-    currentQueue = null;
-    draining = false;
-    runClearTimeout(timeout);
-}
-
-process.nextTick = function (fun) {
-    var args = new Array(arguments.length - 1);
-    if (arguments.length > 1) {
-        for (var i = 1; i < arguments.length; i++) {
-            args[i - 1] = arguments[i];
-        }
-    }
-    queue.push(new Item(fun, args));
-    if (queue.length === 1 && !draining) {
-        runTimeout(drainQueue);
-    }
-};
-
-// v8 likes predictible objects
-function Item(fun, array) {
-    this.fun = fun;
-    this.array = array;
-}
-Item.prototype.run = function () {
-    this.fun.apply(null, this.array);
-};
-process.title = 'browser';
-process.browser = true;
-process.env = {};
-process.argv = [];
-process.version = ''; // empty string to avoid regexp issues
-process.versions = {};
-
-function noop() {}
-
-process.on = noop;
-process.addListener = noop;
-process.once = noop;
-process.off = noop;
-process.removeListener = noop;
-process.removeAllListeners = noop;
-process.emit = noop;
-process.prependListener = noop;
-process.prependOnceListener = noop;
-
-process.listeners = function (name) { return [] }
-
-process.binding = function (name) {
-    throw new Error('process.binding is not supported');
-};
-
-process.cwd = function () { return '/' };
-process.chdir = function (dir) {
-    throw new Error('process.chdir is not supported');
-};
-process.umask = function() { return 0; };
-
-},{}],6:[function(require,module,exports){
-if (typeof Object.create === 'function') {
-  // implementation from standard node.js 'util' module
-  module.exports = function inherits(ctor, superCtor) {
-    ctor.super_ = superCtor
-    ctor.prototype = Object.create(superCtor.prototype, {
-      constructor: {
-        value: ctor,
-        enumerable: false,
-        writable: true,
-        configurable: true
-      }
-    });
   };
-} else {
-  // old school shim for old browsers
-  module.exports = function inherits(ctor, superCtor) {
-    ctor.super_ = superCtor
-    var TempCtor = function () {}
-    TempCtor.prototype = superCtor.prototype
-    ctor.prototype = new TempCtor()
-    ctor.prototype.constructor = ctor
-  }
-}
 
-},{}],7:[function(require,module,exports){
-module.exports = function isBuffer(arg) {
-  return arg && typeof arg === 'object'
-    && typeof arg.copy === 'function'
-    && typeof arg.fill === 'function'
-    && typeof arg.readUInt8 === 'function';
-}
-},{}],8:[function(require,module,exports){
-(function (process,global){
-// Copyright Joyent, Inc. and other Node contributors.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a
-// copy of this software and associated documentation files (the
-// "Software"), to deal in the Software without restriction, including
-// without limitation the rights to use, copy, modify, merge, publish,
-// distribute, sublicense, and/or sell copies of the Software, and to permit
-// persons to whom the Software is furnished to do so, subject to the
-// following conditions:
-//
-// The above copyright notice and this permission notice shall be included
-// in all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
-// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
-// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-// USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-var formatRegExp = /%[sdj%]/g;
-exports.format = function(f) {
-  if (!isString(f)) {
-    var objects = [];
-    for (var i = 0; i < arguments.length; i++) {
-      objects.push(inspect(arguments[i]));
-    }
-    return objects.join(' ');
-  }
-
-  var i = 1;
-  var args = arguments;
-  var len = args.length;
-  var str = String(f).replace(formatRegExp, function(x) {
-    if (x === '%%') return '%';
-    if (i >= len) return x;
-    switch (x) {
-      case '%s': return String(args[i++]);
-      case '%d': return Number(args[i++]);
-      case '%j':
-        try {
-          return JSON.stringify(args[i++]);
-        } catch (_) {
-          return '[Circular]';
-        }
-      default:
-        return x;
-    }
-  });
-  for (var x = args[i]; i < len; x = args[++i]) {
-    if (isNull(x) || !isObject(x)) {
-      str += ' ' + x;
-    } else {
-      str += ' ' + inspect(x);
-    }
-  }
-  return str;
-};
-
-
-// Mark that a method should not be used.
-// Returns a modified function which warns once by default.
-// If --no-deprecation is set, then it is a no-op.
-exports.deprecate = function(fn, msg) {
-  // Allow for deprecating things in the process of starting up.
-  if (isUndefined(global.process)) {
-    return function() {
-      return exports.deprecate(fn, msg).apply(this, arguments);
-    };
-  }
-
-  if (process.noDeprecation === true) {
-    return fn;
-  }
-
-  var warned = false;
-  function deprecated() {
-    if (!warned) {
-      if (process.throwDeprecation) {
-        throw new Error(msg);
-      } else if (process.traceDeprecation) {
-        console.trace(msg);
-      } else {
-        console.error(msg);
-      }
-      warned = true;
-    }
-    return fn.apply(this, arguments);
-  }
-
-  return deprecated;
-};
-
-
-var debugs = {};
-var debugEnviron;
-exports.debuglog = function(set) {
-  if (isUndefined(debugEnviron))
-    debugEnviron = process.env.NODE_DEBUG || '';
-  set = set.toUpperCase();
-  if (!debugs[set]) {
-    if (new RegExp('\\b' + set + '\\b', 'i').test(debugEnviron)) {
-      var pid = process.pid;
-      debugs[set] = function() {
-        var msg = exports.format.apply(exports, arguments);
-        console.error('%s %d: %s', set, pid, msg);
-      };
-    } else {
-      debugs[set] = function() {};
-    }
-  }
-  return debugs[set];
-};
-
-
-/**
- * Echos the value of a value. Trys to print the value out
- * in the best way possible given the different types.
- *
- * @param {Object} obj The object to print out.
- * @param {Object} opts Optional options object that alters the output.
- */
-/* legacy: obj, showHidden, depth, colors*/
-function inspect(obj, opts) {
-  // default options
-  var ctx = {
-    seen: [],
-    stylize: stylizeNoColor
+  parser.oncdata = function(cdata) {
+    cur.cdata = cdata;
   };
-  // legacy...
-  if (arguments.length >= 3) ctx.depth = arguments[2];
-  if (arguments.length >= 4) ctx.colors = arguments[3];
-  if (isBoolean(opts)) {
-    // legacy...
-    ctx.showHidden = opts;
-  } else if (opts) {
-    // got an "options" object
-    exports._extend(ctx, opts);
-  }
-  // set default options
-  if (isUndefined(ctx.showHidden)) ctx.showHidden = false;
-  if (isUndefined(ctx.depth)) ctx.depth = 2;
-  if (isUndefined(ctx.colors)) ctx.colors = false;
-  if (isUndefined(ctx.customInspect)) ctx.customInspect = true;
-  if (ctx.colors) ctx.stylize = stylizeWithColor;
-  return formatValue(ctx, obj, ctx.depth);
+
+  parser.ontext = function (text) {
+    if (!cur.value) {
+      cur.value = '';
+    }
+    cur.value += text;
+  };
+
+  return parser;
 }
-exports.inspect = inspect;
 
-
-// http://en.wikipedia.org/wiki/ANSI_escape_code#graphics
-inspect.colors = {
-  'bold' : [1, 22],
-  'italic' : [3, 23],
-  'underline' : [4, 24],
-  'inverse' : [7, 27],
-  'white' : [37, 39],
-  'grey' : [90, 39],
-  'black' : [30, 39],
-  'blue' : [34, 39],
-  'cyan' : [36, 39],
-  'green' : [32, 39],
-  'magenta' : [35, 39],
-  'red' : [31, 39],
-  'yellow' : [33, 39]
+var xmlom = {
+	parseString: parseString
 };
 
-// Don't use 'blue' not visible on cmd.exe
-inspect.styles = {
-  'special': 'cyan',
-  'number': 'yellow',
-  'boolean': 'yellow',
-  'undefined': 'grey',
-  'null': 'bold',
-  'string': 'green',
-  'date': 'magenta',
-  // "name": intentionally not styling
-  'regexp': 'red'
-};
+exports['default'] = xmlom;
+exports.parseString = parseString;
 
+return exports;
 
-function stylizeWithColor(str, styleType) {
-  var style = inspect.styles[styleType];
-
-  if (style) {
-    return '\u001b[' + inspect.colors[style][0] + 'm' + str +
-           '\u001b[' + inspect.colors[style][1] + 'm';
-  } else {
-    return str;
-  }
-}
-
-
-function stylizeNoColor(str, styleType) {
-  return str;
-}
-
-
-function arrayToHash(array) {
-  var hash = {};
-
-  array.forEach(function(val, idx) {
-    hash[val] = true;
-  });
-
-  return hash;
-}
-
-
-function formatValue(ctx, value, recurseTimes) {
-  // Provide a hook for user-specified inspect functions.
-  // Check that value is an object with an inspect function on it
-  if (ctx.customInspect &&
-      value &&
-      isFunction(value.inspect) &&
-      // Filter out the util module, it's inspect function is special
-      value.inspect !== exports.inspect &&
-      // Also filter out any prototype objects using the circular check.
-      !(value.constructor && value.constructor.prototype === value)) {
-    var ret = value.inspect(recurseTimes, ctx);
-    if (!isString(ret)) {
-      ret = formatValue(ctx, ret, recurseTimes);
-    }
-    return ret;
-  }
-
-  // Primitive types cannot have properties
-  var primitive = formatPrimitive(ctx, value);
-  if (primitive) {
-    return primitive;
-  }
-
-  // Look up the keys of the object.
-  var keys = Object.keys(value);
-  var visibleKeys = arrayToHash(keys);
-
-  if (ctx.showHidden) {
-    keys = Object.getOwnPropertyNames(value);
-  }
-
-  // IE doesn't make error fields non-enumerable
-  // http://msdn.microsoft.com/en-us/library/ie/dww52sbt(v=vs.94).aspx
-  if (isError(value)
-      && (keys.indexOf('message') >= 0 || keys.indexOf('description') >= 0)) {
-    return formatError(value);
-  }
-
-  // Some type of object without properties can be shortcutted.
-  if (keys.length === 0) {
-    if (isFunction(value)) {
-      var name = value.name ? ': ' + value.name : '';
-      return ctx.stylize('[Function' + name + ']', 'special');
-    }
-    if (isRegExp(value)) {
-      return ctx.stylize(RegExp.prototype.toString.call(value), 'regexp');
-    }
-    if (isDate(value)) {
-      return ctx.stylize(Date.prototype.toString.call(value), 'date');
-    }
-    if (isError(value)) {
-      return formatError(value);
-    }
-  }
-
-  var base = '', array = false, braces = ['{', '}'];
-
-  // Make Array say that they are Array
-  if (isArray(value)) {
-    array = true;
-    braces = ['[', ']'];
-  }
-
-  // Make functions say that they are functions
-  if (isFunction(value)) {
-    var n = value.name ? ': ' + value.name : '';
-    base = ' [Function' + n + ']';
-  }
-
-  // Make RegExps say that they are RegExps
-  if (isRegExp(value)) {
-    base = ' ' + RegExp.prototype.toString.call(value);
-  }
-
-  // Make dates with properties first say the date
-  if (isDate(value)) {
-    base = ' ' + Date.prototype.toUTCString.call(value);
-  }
-
-  // Make error with message first say the error
-  if (isError(value)) {
-    base = ' ' + formatError(value);
-  }
-
-  if (keys.length === 0 && (!array || value.length == 0)) {
-    return braces[0] + base + braces[1];
-  }
-
-  if (recurseTimes < 0) {
-    if (isRegExp(value)) {
-      return ctx.stylize(RegExp.prototype.toString.call(value), 'regexp');
-    } else {
-      return ctx.stylize('[Object]', 'special');
-    }
-  }
-
-  ctx.seen.push(value);
-
-  var output;
-  if (array) {
-    output = formatArray(ctx, value, recurseTimes, visibleKeys, keys);
-  } else {
-    output = keys.map(function(key) {
-      return formatProperty(ctx, value, recurseTimes, visibleKeys, key, array);
-    });
-  }
-
-  ctx.seen.pop();
-
-  return reduceToSingleString(output, base, braces);
-}
-
-
-function formatPrimitive(ctx, value) {
-  if (isUndefined(value))
-    return ctx.stylize('undefined', 'undefined');
-  if (isString(value)) {
-    var simple = '\'' + JSON.stringify(value).replace(/^"|"$/g, '')
-                                             .replace(/'/g, "\\'")
-                                             .replace(/\\"/g, '"') + '\'';
-    return ctx.stylize(simple, 'string');
-  }
-  if (isNumber(value))
-    return ctx.stylize('' + value, 'number');
-  if (isBoolean(value))
-    return ctx.stylize('' + value, 'boolean');
-  // For some reason typeof null is "object", so special case here.
-  if (isNull(value))
-    return ctx.stylize('null', 'null');
-}
-
-
-function formatError(value) {
-  return '[' + Error.prototype.toString.call(value) + ']';
-}
-
-
-function formatArray(ctx, value, recurseTimes, visibleKeys, keys) {
-  var output = [];
-  for (var i = 0, l = value.length; i < l; ++i) {
-    if (hasOwnProperty(value, String(i))) {
-      output.push(formatProperty(ctx, value, recurseTimes, visibleKeys,
-          String(i), true));
-    } else {
-      output.push('');
-    }
-  }
-  keys.forEach(function(key) {
-    if (!key.match(/^\d+$/)) {
-      output.push(formatProperty(ctx, value, recurseTimes, visibleKeys,
-          key, true));
-    }
-  });
-  return output;
-}
-
-
-function formatProperty(ctx, value, recurseTimes, visibleKeys, key, array) {
-  var name, str, desc;
-  desc = Object.getOwnPropertyDescriptor(value, key) || { value: value[key] };
-  if (desc.get) {
-    if (desc.set) {
-      str = ctx.stylize('[Getter/Setter]', 'special');
-    } else {
-      str = ctx.stylize('[Getter]', 'special');
-    }
-  } else {
-    if (desc.set) {
-      str = ctx.stylize('[Setter]', 'special');
-    }
-  }
-  if (!hasOwnProperty(visibleKeys, key)) {
-    name = '[' + key + ']';
-  }
-  if (!str) {
-    if (ctx.seen.indexOf(desc.value) < 0) {
-      if (isNull(recurseTimes)) {
-        str = formatValue(ctx, desc.value, null);
-      } else {
-        str = formatValue(ctx, desc.value, recurseTimes - 1);
-      }
-      if (str.indexOf('\n') > -1) {
-        if (array) {
-          str = str.split('\n').map(function(line) {
-            return '  ' + line;
-          }).join('\n').substr(2);
-        } else {
-          str = '\n' + str.split('\n').map(function(line) {
-            return '   ' + line;
-          }).join('\n');
-        }
-      }
-    } else {
-      str = ctx.stylize('[Circular]', 'special');
-    }
-  }
-  if (isUndefined(name)) {
-    if (array && key.match(/^\d+$/)) {
-      return str;
-    }
-    name = JSON.stringify('' + key);
-    if (name.match(/^"([a-zA-Z_][a-zA-Z_0-9]*)"$/)) {
-      name = name.substr(1, name.length - 2);
-      name = ctx.stylize(name, 'name');
-    } else {
-      name = name.replace(/'/g, "\\'")
-                 .replace(/\\"/g, '"')
-                 .replace(/(^"|"$)/g, "'");
-      name = ctx.stylize(name, 'string');
-    }
-  }
-
-  return name + ': ' + str;
-}
-
-
-function reduceToSingleString(output, base, braces) {
-  var numLinesEst = 0;
-  var length = output.reduce(function(prev, cur) {
-    numLinesEst++;
-    if (cur.indexOf('\n') >= 0) numLinesEst++;
-    return prev + cur.replace(/\u001b\[\d\d?m/g, '').length + 1;
-  }, 0);
-
-  if (length > 60) {
-    return braces[0] +
-           (base === '' ? '' : base + '\n ') +
-           ' ' +
-           output.join(',\n  ') +
-           ' ' +
-           braces[1];
-  }
-
-  return braces[0] + base + ' ' + output.join(', ') + ' ' + braces[1];
-}
-
-
-// NOTE: These type checking functions intentionally don't use `instanceof`
-// because it is fragile and can be easily faked with `Object.create()`.
-function isArray(ar) {
-  return Array.isArray(ar);
-}
-exports.isArray = isArray;
-
-function isBoolean(arg) {
-  return typeof arg === 'boolean';
-}
-exports.isBoolean = isBoolean;
-
-function isNull(arg) {
-  return arg === null;
-}
-exports.isNull = isNull;
-
-function isNullOrUndefined(arg) {
-  return arg == null;
-}
-exports.isNullOrUndefined = isNullOrUndefined;
-
-function isNumber(arg) {
-  return typeof arg === 'number';
-}
-exports.isNumber = isNumber;
-
-function isString(arg) {
-  return typeof arg === 'string';
-}
-exports.isString = isString;
-
-function isSymbol(arg) {
-  return typeof arg === 'symbol';
-}
-exports.isSymbol = isSymbol;
-
-function isUndefined(arg) {
-  return arg === void 0;
-}
-exports.isUndefined = isUndefined;
-
-function isRegExp(re) {
-  return isObject(re) && objectToString(re) === '[object RegExp]';
-}
-exports.isRegExp = isRegExp;
-
-function isObject(arg) {
-  return typeof arg === 'object' && arg !== null;
-}
-exports.isObject = isObject;
-
-function isDate(d) {
-  return isObject(d) && objectToString(d) === '[object Date]';
-}
-exports.isDate = isDate;
-
-function isError(e) {
-  return isObject(e) &&
-      (objectToString(e) === '[object Error]' || e instanceof Error);
-}
-exports.isError = isError;
-
-function isFunction(arg) {
-  return typeof arg === 'function';
-}
-exports.isFunction = isFunction;
-
-function isPrimitive(arg) {
-  return arg === null ||
-         typeof arg === 'boolean' ||
-         typeof arg === 'number' ||
-         typeof arg === 'string' ||
-         typeof arg === 'symbol' ||  // ES6 symbol
-         typeof arg === 'undefined';
-}
-exports.isPrimitive = isPrimitive;
-
-exports.isBuffer = require('./support/isBuffer');
-
-function objectToString(o) {
-  return Object.prototype.toString.call(o);
-}
-
-
-function pad(n) {
-  return n < 10 ? '0' + n.toString(10) : n.toString(10);
-}
-
-
-var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep',
-              'Oct', 'Nov', 'Dec'];
-
-// 26 Feb 16:19:34
-function timestamp() {
-  var d = new Date();
-  var time = [pad(d.getHours()),
-              pad(d.getMinutes()),
-              pad(d.getSeconds())].join(':');
-  return [d.getDate(), months[d.getMonth()], time].join(' ');
-}
-
-
-// log is just a thin wrapper to console.log that prepends a timestamp
-exports.log = function() {
-  console.log('%s - %s', timestamp(), exports.format.apply(exports, arguments));
-};
-
-
-/**
- * Inherit the prototype methods from one constructor into another.
- *
- * The Function.prototype.inherits from lang.js rewritten as a standalone
- * function (not on Function.prototype). NOTE: If this file is to be loaded
- * during bootstrapping this function needs to be rewritten using some native
- * functions as prototype setup using normal JavaScript does not work as
- * expected during bootstrapping (see mirror.js in r114903).
- *
- * @param {function} ctor Constructor function which needs to inherit the
- *     prototype.
- * @param {function} superCtor Constructor function to inherit prototype from.
- */
-exports.inherits = require('inherits');
-
-exports._extend = function(origin, add) {
-  // Don't do anything if add isn't an object
-  if (!add || !isObject(add)) return origin;
-
-  var keys = Object.keys(add);
-  var i = keys.length;
-  while (i--) {
-    origin[keys[i]] = add[keys[i]];
-  }
-  return origin;
-};
-
-function hasOwnProperty(obj, prop) {
-  return Object.prototype.hasOwnProperty.call(obj, prop);
-}
-
-}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./support/isBuffer":7,"_process":5,"inherits":6}]},{},[1]);
+}({},stream,string_decoder));

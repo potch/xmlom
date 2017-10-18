@@ -1,1 +1,0 @@
-window.xmlom = require('./index');
