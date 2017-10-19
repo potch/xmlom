@@ -44,18 +44,20 @@ Node.prototype.find = function (name) {
   return results;
 };
 
-exports.parseString = function parseString (str) {
+exports.parseString = function parseString (str, options) {
   return new Promise(function (resolve, reject) {
-    var parser = getParser(resolve, reject);
+    var parser = getParser(resolve, reject, options);
     parser.write(str).close();
   });
 };
 
-function getParser(callback, error) {
+function getParser(callback, error, options) {
+  options = options || {};
+
   var cur = new Node();
   cur.root = true;
 
-  var parser = sax.parser(true, { position: true });
+  var parser = sax.parser(options.strict || true, options);
 
   parser.onerror = function (e) {
     error(e);

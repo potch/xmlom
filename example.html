@@ -3,17 +3,98 @@
   <head>
     <meta charset="utf-8">
     <title>xmlom browser test</title>
+    <style>
+      .app {
+        display: grid;
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        grid-template-columns: 1fr 1fr;
+      }
+      .doc {
+        margin: 0;
+        padding: 1em;
+        resize: none;
+      }
+      .out {
+        padding: 1em;
+        white-space: pre-wrap;
+      }
+      .edit {
+        border-right: 1px solid black;
+        display: grid;
+        grid-template-rows: 1fr auto;
+      }
+      button {
+        padding: 1em;
+        margin: 1em;
+      }
+      details {
+        padding-left: 1em;
+        border-left: 1px solid black;
+      }
+    </style>
   </head>
   <body>
+    <div class="app">
+      <div class="edit">
+        <textarea class="doc"></textarea>
+        <button class="submit">parse</button>
+      </div>
+      <div class="out"></div>
+    </div>
     <script src="browser/xmlom.js"></script>
     <script>
       fetch('test/01.xml')
       .then(r => r.text())
-      .then(t => xmlom.parseString(t))
-      .then(o => {
-        console.log(o);
-        window.obj = o;
+      .then(t => {
+        document.querySelector('.doc').appendChild(document.createTextNode(t));
+        parse(t);
+      })
+
+      function walk(node) {
+        let s = '<details open>';
+        s += '<summary>';
+        if (node.root) {
+          s += 'root';
+        } else {
+          s += '&lt;' + node.name + '>';
+        }
+        s += '</summary>';
+        if (node.attrs) {
+          s += '<ul>';
+          for (var i in node.attrs) {
+            s += '<li>'
+            s += '<b>' + i + ':</b> ' + node.attrs[i];
+            s += '</li>'
+          }
+          s += '</ul>';
+        }
+        if (node.children) {
+          node.children.forEach(c => s += walk(c));
+        }
+        s += '</details>';
+        return s;
+      }
+
+      function parse(s) {
+        xmlom.parseString(s)
+        .then(function (doc) {
+          document.querySelector('.out').innerHTML = walk(doc.root);
+          window.doc = doc;
+          console.log(doc);
+        })
+        .catch(function (error) {
+          document.querySelector('.out').innerText = error;
+        })
+      }
+
+      document.querySelector('button').addEventListener('click', function (e) {
+        parse(document.querySelector('.doc').value);
       });
+
     </script>
   </body>
 </html>
