@@ -57,7 +57,10 @@ function getParser(callback, error, options) {
   var cur = new Node();
   cur.root = true;
 
-  var parser = sax.parser(options.strict || true, options);
+  var parser = sax.parser(
+    'strict' in options ? options.strict : true,
+    options
+  );
 
   parser.onerror = function (e) {
     error(e);
