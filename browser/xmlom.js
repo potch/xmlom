@@ -6855,8 +6855,16 @@ function getParser(callback, error, options) {
 
   parser.onopentag = function (obj) {
     var o = new Node(obj.name);
+    o.attrs = {};
     if (obj.attributes) {
-      o.attrs = obj.attributes;
+      for (var attr in obj.attributes) {
+        var val = obj.attributes[attr];
+        if (val.value) {
+          o.attrs[attr] = val.value;
+        } else {
+          o.attrs[attr] = val;
+        }
+      }
     }
     o.parent = cur;
     cur.children.push(o);
