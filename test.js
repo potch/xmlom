@@ -82,3 +82,13 @@ test('Nesting Errors', function (t) {
     t.end();
   });
 });
+
+test('Attributes', function (t) {
+  loadTestDocument(t, function (doc) {
+    var node = doc.find('node')[0];
+    console.error('node.attrs', node.attrs);
+    t.equal('attribute' in node.attrs, true, 'attribute is key');
+    t.equal(node.attrs.attribute, 'value', 'value is string');
+    t.end();
+  });
+})

@@ -21,7 +21,7 @@
   "scripts": {
     "test": "tap test.js",
     "browser": "rollup -c",
-    "dev": "onchange index.js -- npm run test"
+    "dev": "onchange *.js -- npm run test"
   },
   "repository": {
     "type": "git",
