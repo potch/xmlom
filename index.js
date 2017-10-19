@@ -55,7 +55,7 @@ function getParser(callback, error) {
   var cur = new Node();
   cur.root = true;
 
-  var parser = sax.parser(true);
+  var parser = sax.parser(true, { position: true });
 
   parser.onerror = function (e) {
     error(e);

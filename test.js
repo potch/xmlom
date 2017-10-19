@@ -72,3 +72,13 @@ test('Node.parents', function (t) {
     t.end();
   });
 });
+
+test('Nesting Errors', function (t) {
+  xml.parseString('<root><foo><bar></foo></bar></root>').then(function () {
+    t.fail('string should fail');
+    t.end();
+  }).catch(function (error) {
+    t.ok(error);
+    t.end();
+  });
+});
