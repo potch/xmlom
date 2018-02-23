@@ -16,7 +16,7 @@
     "rollup-plugin-node-builtins": "^2.1.2",
     "rollup-plugin-node-resolve": "^3.0.0",
     "rollupify": "^0.4.0",
-    "tap": "^5.1.1"
+    "tap": "^11.1.1"
   },
   "scripts": {
     "test": "tap test.js",
