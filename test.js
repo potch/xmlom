@@ -45,6 +45,8 @@ test('Node properties', function (t) {
 
     t.ok(node.parent, 'parent');
 
+    t.equal(node.comment.trim(), 'this is a comment', 'node comments');
+
     t.equal(node.children.length, 1, 'children');
     t.end();
   });
@@ -86,7 +88,6 @@ test('Nesting Errors', function (t) {
 test('Attributes', function (t) {
   loadTestDocument(t, function (doc) {
     var node = doc.find('node')[0];
-    console.error('node.attrs', node.attrs);
     t.equal('attribute' in node.attrs, true, 'attribute is key');
     t.equal(node.attrs.attribute, 'value', 'value is string');
     t.end();

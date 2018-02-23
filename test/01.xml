@@ -1,4 +1,5 @@
 <test>
+  <!-- this is a comment -->
   <node attribute="value">
     stuff
     <details>
