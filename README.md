@@ -1,5 +1,7 @@
 # xmlom - a tiny XML object model
 
+[![Greenkeeper badge](https://badges.greenkeeper.io/potch/xmlom.svg)](https://greenkeeper.io/)
+
 ## Usage
 
 ### `xmlom.parseString(str)`
