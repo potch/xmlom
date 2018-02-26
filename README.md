@@ -64,6 +64,16 @@ An Object containing each of the Node's attributes as keys.
 node.attrs.bar; // "baz"
 ```
 
+### Node.comment
+
+The text of any commments directly preceding the Node:
+
+```js
+/* <!-- This is a comment -->
+   <foo>bar</foo> */
+node.comment; // "This is a comment"
+```
+
 ### Node.find(nodeName)
 
 Locate all child Nodes named `nodeName`
