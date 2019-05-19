@@ -11,7 +11,7 @@
     "tap": "^11.1.1"
   },
   "devDependencies": {
-    "onchange": "^3.2.1",
+    "onchange": "^6.0.0",
     "rollup": "^0.56.2",
     "rollup-plugin-commonjs": "^8.2.3",
     "rollup-plugin-node-builtins": "^2.1.2",
