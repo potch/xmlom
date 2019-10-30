@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "sax": "^1.2.4",
-    "tap": "^14.2.1"
+    "tap": "^14.9.0"
   },
   "devDependencies": {
     "onchange": "^4.0.0",
