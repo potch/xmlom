@@ -7,10 +7,10 @@
     "test": "test"
   },
   "dependencies": {
-    "sax": "^1.2.4",
-    "tap": "^14.2.1"
+    "sax": "^1.2.4"
   },
   "devDependencies": {
+    "tap": "^14.2.1",
     "onchange": "^4.0.0",
     "rollup": "^0.56.2",
     "rollup-plugin-commonjs": "^9.0.0",
